@@ -13,19 +13,53 @@ feature rather than including every earlier commit in its PR.
 Requires **Node.js 22+**, Git 2.36+, and an authenticated GitHub CLI. No npm
 dependencies or compilation are required for the CLI or browser UI.
 
+Install directly from GitHub, from any directory:
+
+```sh
+gh extension install yperess/gh-pr-manager
+gh alias set prm pr-manager
+gh prm --help
+```
+
+GitHub CLI downloads and manages the extension; no manual clone or `npm install`
+is needed. The extension's command is `gh pr-manager`; the alias makes it
+`gh prm`. The normal `gh pr` commands are unaffected.
+
+### Upgrade
+
+Update a GitHub-installed copy with:
+
+```sh
+gh extension upgrade pr-manager
+```
+
+Use the extension name `pr-manager`, rather than the `prm` alias, for extension
+management commands. See the official [installation](https://cli.github.com/manual/gh_extension_install)
+and [upgrade](https://cli.github.com/manual/gh_extension_upgrade) documentation.
+
+### Local development installation
+
+To work on the extension itself, clone the repository and install a link to the
+checkout instead:
+
 ```sh
 git clone git@github.com:yperess/gh-pr-manager.git
 cd gh-pr-manager
 gh extension install .
 gh alias set prm pr-manager
-gh prm --help
 ```
 
-The repository's extension name is `pr-manager`; the alias makes the command
-`gh prm`. Both launchers are included. The normal `gh pr` commands are unaffected.
+This installation uses the local checkout directly, including uncommitted edits.
+Update that checkout with Git rather than `gh extension upgrade`.
+You can also run `/path/to/gh-pr-manager/gh-prm` directly from a target repository.
+To switch an existing local installation to the GitHub-managed copy, run:
 
-For local development, run `/path/to/gh-pr-manager/gh-prm` directly from a target
-repository. A locally installed gh extension points at this checkout.
+```sh
+gh extension remove pr-manager
+gh extension install yperess/gh-pr-manager
+```
+
+The existing `prm` alias can be kept.
 
 ## Start a workflow
 
