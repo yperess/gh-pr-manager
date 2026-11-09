@@ -94,6 +94,12 @@ async function editor(vscodeMode = false) {
         status: "READY",
       });
       graph.revision += "x";
+    } else if (route === "branch") {
+      assert.equal(body.revision, graph.revision);
+      const group = graph.groups.find((g) => g.name === body.name);
+      group.branchName = body.branchName;
+      group.branch = body.branchName ?? `prm/${group.name}`;
+      graph.revision += "x";
     } else if (route === "metadata") {
       assert.equal(body.revision, graph.revision);
       Object.assign(
@@ -219,6 +225,35 @@ test("graph editor saves changed prerequisites and feature assignments through t
 });
 
 for (const vscodeMode of [false, true]) {
+  test(`${vscodeMode ? "VS Code" : "Browser"} feature inspector displays and edits branch names`, async () => {
+    const { window, document, calls } = await editor(vscodeMode);
+    document
+      .querySelectorAll(".feature-card")[0]
+      .dispatchEvent(new window.Event("click"));
+    assert.equal(
+      document.getElementById("feature-branch").textContent,
+      "prm/feature1",
+    );
+    for (const value of ["yperess/migrate-struct-fixture", ""]) {
+      document.getElementById("branch-name").value = value;
+      document
+        .getElementById("branch-form")
+        .dispatchEvent(new window.Event("submit", { cancelable: true }));
+      await until(
+        () =>
+          document.getElementById("notice").textContent ===
+          "Branch name saved to notes.",
+      );
+      assert.equal(
+        calls.filter((c) => c.route === "branch").at(-1).body.branchName,
+        value || null,
+      );
+      assert.equal(
+        document.getElementById("feature-branch").textContent,
+        value || "prm/feature1",
+      );
+    }
+  });
   test(`${vscodeMode ? "VS Code" : "Browser"} editor displays metadata as of a commit and saves, removes, and clears overrides`, async () => {
     const { window, document, calls } = await editor(vscodeMode);
     const click = (node) => node.dispatchEvent(new window.Event("click"));

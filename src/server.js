@@ -75,6 +75,11 @@ export function createServer(manager, token = randomBytes(32).toString("hex")) {
             200,
             manager.metadata(data.sha, data.overrides, data.revision),
           );
+        if (url.pathname === "/api/branch")
+          return reply(
+            200,
+            manager.branchName(data.name, data.branchName, data.revision),
+          );
         if (
           url.pathname === "/api/deps" &&
           Array.isArray(data.deps) &&

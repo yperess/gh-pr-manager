@@ -287,6 +287,8 @@ function selectFeature(name) {
   }
   $("feature-name").value = name;
   $("feature-state").textContent = status(group);
+  $("feature-branch").textContent = group.branch ?? `prm/${group.name}`;
+  $("branch-name").value = group.branchName ?? "";
   $("feature-title").textContent = group.title ?? group.name;
   $("feature-title-source").textContent = metadataSource(
     group.titleSource,
@@ -320,6 +322,21 @@ function selectFeature(name) {
   if (!$("deps-options").children.length)
     $("deps-options").append(element("p", "No other features yet.", "muted"));
 }
+$("branch-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    $("notice").textContent = "Saving branch name…";
+    await api("branch", {
+      name: selectedFeature,
+      branchName: $("branch-name").value || null,
+      revision: graph.revision,
+    });
+    await refresh();
+    $("notice").textContent = "Branch name saved to notes.";
+  } catch (e) {
+    error(e);
+  }
+});
 function metadataSource(sha, field) {
   return sha
     ? `From commit ${sha.slice(0, 7)}`

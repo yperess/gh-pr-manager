@@ -30,6 +30,8 @@ try {
       throw new Error("The repository changed. Refresh before editing.");
     if (route === "metadata")
       result = manager.metadata(data.sha, data.overrides, data.revision);
+    else if (route === "branch")
+      result = manager.branchName(data.name, data.branchName, data.revision);
     else if (
       route === "deps" &&
       Array.isArray(data.deps) &&

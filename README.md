@@ -89,6 +89,71 @@ PR numbers and published source-commit mappings are currently local metadata in
 the Git common directory's `prm/state.json`; notes alone do not restore an
 existing workflow on another clone.
 
+## Branch names and adopting existing PRs
+
+New branches default to `prm/FEATURE`. An optional **repository-root `.ghprm`**
+can set a contributor's prefix:
+
+```ini
+BRANCH_PREFIX=yperess
+```
+
+Both `yperess` and `yperess/` produce `yperess/FEATURE`. An empty value uses
+the feature name without a prefix. Blank lines and full-line `#` comments are
+allowed; values can also be JSON-quoted strings. This is a literal configuration
+file, never a shell script: no variable expansion, commands, or `export` syntax.
+Unknown or duplicate settings and invalid Git branch names are rejected.
+
+For personal configuration, add `/.ghprm` to `.git/info/exclude` before creating
+the file. Otherwise commit it as shared repository configuration. An untracked,
+unignored `.ghprm` counts as a dirty working tree and blocks push/sync.
+The file is read from the managed checkout's root even when running in a subdirectory.
+
+Override a feature's **full** branch name with a note:
+
+```text
+prm-name: struct-fixture
+prm-branch-name: yperess/migrate-struct-fixture
+```
+
+Unquoted names and JSON strings are accepted. The last explicit branch override
+in feature commit order wins. The CLI offers a shortcut that stores one canonical
+override on the feature's first commit and removes later branch overrides:
+
+```sh
+gh prm branch struct-fixture yperess/migrate-struct-fixture
+gh prm branch optional-interface-fixture yperess/migrate-optional-interface-fixture
+gh prm branch struct-fixture --clear
+gh prm status
+gh prm push --dry-run
+```
+
+The browser and VS Code feature inspectors show the resolved branch name and
+allow setting or clearing this override. Explicit names bypass `BRANCH_PREFIX`.
+Once published, the branch stays fixed even if the prefix changes or its note
+override is cleared. A different explicit name is rejected. Two features cannot
+share a branch, and neither can target the base or managed working branch.
+
+To adopt existing branches, first bring their commits onto your linear managed
+working branch (for example, cherry-pick each independent branch's commits onto
+a fresh integration branch from `origin/develop`). Tag those commits with their
+feature names, then set each feature's existing full branch name as above.
+Inspect `push --dry-run`, then run `push` for the features you want to adopt.
+
+An existing remote branch is adopted only with an explicit `prm-branch-name`
+and a ready feature. Its history must be linear, contain the current remote
+base, and match the feature projection's tree, commit count, and ordered patch
+IDs. Commit IDs may differ because of cherry-picking. The initial adoption keeps
+the remote commit IDs and reuses its open PR against the configured base; if no
+open PR exists, one is created. Existing PR titles and descriptions are retained.
+Unrelated work, a stale base, or a PR against a different base stops publication.
+Reconcile those branches yourself first; previews cannot adopt existing branches.
+
+Branch checks run for the whole selected batch before any push. Exact
+force-with-lease checks also protect against remote changes during publication.
+Neither naming nor adoption changes local feature branch refs. Later review
+updates and sync use the same workflow as newly created PRs.
+
 ## Publish ready work, or push a named preview
 
 ### PR metadata at each commit
@@ -136,7 +201,7 @@ blocked groups. Untagged commits must be assigned before a default push.
 With names, only those features are selected:
 
 * A **ready** feature is replayed onto the remote base in a temporary worktree.
-  Only its own commits go on `prm/FEATURE`. A PR is created against the base, or
+  Only its own commits go on its resolved branch (`prm/FEATURE` by default). A PR is created against the base, or
   the existing PR branch is updated with an explicit force-with-lease.
 * A **blocked** feature gets a **preview branch** at the working branch's full
   current HEAD. This intentionally includes all current linear history,

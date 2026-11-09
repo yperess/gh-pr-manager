@@ -7,6 +7,7 @@ import {
   Manager,
   NOTES,
   parseNote,
+  parseConfig,
   editNote,
   editMetadataNote,
   run,
@@ -114,6 +115,231 @@ function fixture(t) {
     updatePrHeads,
   };
 }
+
+function configure(f, content) {
+  fs.appendFileSync(path.join(f.root, ".git/info/exclude"), "\n.ghprm\n");
+  fs.writeFileSync(path.join(f.root, ".ghprm"), content);
+}
+
+test("root config is literal, optional and strict", () => {
+  assert.equal(parseConfig("").branchPrefix, "prm/");
+  for (const value of ["yperess", "yperess/", '"yperess"'])
+    assert.equal(
+      parseConfig(`# personal config\nBRANCH_PREFIX=${value}\n`).branchPrefix,
+      "yperess/",
+    );
+  assert.equal(parseConfig("BRANCH_PREFIX=").branchPrefix, "");
+  assert.equal(
+    parseConfig("BRANCH_PREFIX=$(whoami)").branchPrefix,
+    "$(whoami)/",
+  );
+  assert.throws(() => parseConfig("UNKNOWN=x"), /Invalid .ghprm/);
+  assert.throws(
+    () => parseConfig("BRANCH_PREFIX=x\nBRANCH_PREFIX=y"),
+    /Invalid .ghprm/,
+  );
+});
+
+test("custom prefixes apply to new branches and never rename published branches", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  configure(f, "BRANCH_PREFIX=yperess/");
+  fs.mkdirSync(path.join(f.root, "subdir"));
+  m.tag("one", [f.commit("A")]);
+  assert.equal(
+    new Manager(path.join(f.root, "subdir"), m.gh).graph().groups[0].branch,
+    "yperess/one",
+  );
+  assert.equal(m.push({ dryRun: true }).ready[0].branch, "yperess/one");
+  m.push();
+  assert.equal(m.state().features.one.branch, "yperess/one");
+  const revision = m.graph().revision;
+  configure(f, "BRANCH_PREFIX=someone");
+  assert.notEqual(m.graph().revision, revision);
+  m.tag("two", [f.commit("B")]);
+  assert.deepEqual(
+    m.graph().groups.map((g) => g.branch),
+    ["yperess/one", "someone/two"],
+  );
+  m.push();
+  assert.equal(f.prs.size, 2);
+  assert.throws(
+    () => m.branchName("one", "someone/one"),
+    /Cannot rename published/,
+  );
+  m.branchName("one", null);
+  assert.equal(m.graph().groups[0].branch, "yperess/one");
+});
+
+test("branch notes use the last override and survive other edits and sync", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  const a = f.commit("A");
+  m.tag("one", [a]);
+  m.writeNote(a, `${m.note(a)}\nprm-branch-name: first/branch`);
+  const b = f.commit("B");
+  m.tag("one", [b]);
+  m.writeNote(
+    b,
+    `${m.note(b)}\nprm-branch-name: "yperess/migrate-struct-fixture"`,
+  );
+  assert.equal(m.graph().groups[0].branch, "yperess/migrate-struct-fixture");
+  m.metadata(b, { description: "Body\nprm-branch-name: literal body" });
+  m.dependencies("one", []);
+  assert.equal(
+    parseNote(m.note(b)).branchName,
+    "yperess/migrate-struct-fixture",
+  );
+  assert.equal(
+    parseNote(m.note(b)).description,
+    "Body\nprm-branch-name: literal body",
+  );
+  m.sync();
+  assert.equal(m.graph().groups[0].branch, "yperess/migrate-struct-fixture");
+  m.branchName("one", "yperess/migrate-optional-interface-fixture");
+  assert.equal(
+    parseNote(m.note(m.graph().groups[0].commits[1])).branchName,
+    null,
+  );
+  m.branchName("one", null);
+  assert.equal(m.graph().groups[0].branch, "prm/one");
+  assert.throws(
+    () => parseNote("prm-branch-name: x\nprm-branch-name: y"),
+    /only one/,
+  );
+});
+
+test("invalid branch names and conflicting targets fail before remote writes", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("one", [f.commit("A")]);
+  m.tag("two", [f.commit("B")]);
+  for (const branch of [
+    "main",
+    "work",
+    "prm/two",
+    "prm/two/child",
+    "prm",
+    "main/child",
+    "bad..name",
+    "bad name",
+    "",
+    "-option",
+    "HEAD",
+  ])
+    assert.throws(
+      () => m.branchName("one", branch),
+      /conflicts|Invalid branch/,
+    );
+  configure(f, "BRANCH_PREFIX=bad//prefix");
+  assert.throws(() => m.push(), /Invalid branch/);
+  assert.equal(f.prs.size, 0);
+  assert.equal(f.git("ls-remote", "--heads", "origin", "refs/heads/prm/*"), "");
+});
+
+test("explicit adoption preserves an existing branch and PR, then supports review and sync", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  const a = f.commit("A");
+  m.tag("one", [a]);
+  const branch = "yperess/migrate-struct-fixture";
+  f.git("push", "origin", `HEAD:refs/heads/${branch}`);
+  f.prs.set(branch, {
+    number: 42,
+    url: "https://github.test/user/repo/pull/42",
+    state: "OPEN",
+    baseRefName: "main",
+    headRefOid: a,
+    title: "Existing review",
+  });
+  m.branchName("one", branch);
+  const result = m.push();
+  assert.equal(result.pushed[0].pr, 42);
+  assert.equal(m.state().features.one.publishedHead, a);
+  assert.equal(f.prs.size, 1);
+  m.tag("one", [f.commit("Review")]);
+  m.push();
+  assert.deepEqual(f.subjects(m.state().features.one.publishedHead), [
+    "A",
+    "Review",
+  ]);
+  assert.equal(f.prs.get(branch).title, "Existing review");
+  f.updatePrHeads();
+  f.merge("one");
+  m.sync();
+  assert.equal(m.graph().commits.length, 0);
+});
+
+test("adoption accepts equivalent cherry-picks with different commit IDs", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("other", [f.commit("Other")]);
+  const a = f.commit("A");
+  m.tag("one", [a]);
+  const dir = m.createWorktree("origin/main");
+  const projected = m.replay(dir, a);
+  run("git", ["push", "origin", "HEAD:refs/heads/yperess/existing"], dir);
+  m.removeWorktree(dir);
+  assert.notEqual(a, projected);
+  m.branchName("one", "yperess/existing");
+  m.push({ names: ["one"] });
+  assert.equal(m.state().features.one.publishedHead, projected);
+});
+
+test("adoption rejects extra remote commits without publishing any of the batch", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("one", [f.commit("A")]);
+  const extra = f.commit("Extra");
+  m.tag("two", [extra]);
+  f.git("push", "origin", "HEAD:yperess/existing");
+  m.branchName("two", "yperess/existing");
+  assert.throws(() => m.push(), /does not match/);
+  assert.equal(f.prs.size, 0);
+  assert.equal(f.git("ls-remote", "--heads", "origin", "prm/one"), "");
+  assert.equal(run("git", ["rev-parse", "yperess/existing"], f.bare), extra);
+});
+
+test("adoption rejects a PR targeting the wrong base before modifying its branch", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  const a = f.commit("A");
+  m.tag("one", [a]);
+  f.git("push", "origin", "HEAD:yperess/existing");
+  f.prs.set("yperess/existing", {
+    number: 1,
+    state: "OPEN",
+    baseRefName: "another-base",
+  });
+  m.branchName("one", "yperess/existing");
+  assert.throws(() => m.push(), /unique PR/);
+  assert.deepEqual(m.state().features, {});
+});
+
+test("adoption uses an exact lease if a remote branch changes after preflight", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  const a = f.commit("A");
+  m.tag("one", [a]);
+  f.git("push", "origin", "HEAD:refs/heads/yperess/existing");
+  const race = f.commit("Race");
+  m.tag("race", [race]);
+  f.git("push", "origin", "HEAD:refs/heads/race-object");
+  m.branchName("one", "yperess/existing");
+  const original = m.git.bind(m);
+  m.git = (...args) => {
+    if (args[0] === "push")
+      run(
+        "git",
+        ["update-ref", "refs/heads/yperess/existing", race, a],
+        f.bare,
+      );
+    return original(...args);
+  };
+  assert.throws(() => m.push({ names: ["one"] }), /stale info/);
+  assert.equal(run("git", ["rev-parse", "yperess/existing"], f.bare), race);
+  assert.deepEqual(m.state().features, {});
+});
 
 test("A–F workflow isolates sibling PRs, handles review commits, squash merges, and notes rewrites", (t) => {
   const f = fixture(t),
@@ -360,7 +586,7 @@ test("remote branch collisions are never overwritten", (t) => {
   const A = f.commit("A");
   m.tag("one", [A]);
   f.git("push", "origin", "HEAD:refs/heads/prm/one");
-  assert.throws(() => m.push(), /changed outside prm/);
+  assert.throws(() => m.push(), /already exists/);
   assert.equal(f.prs.size, 0);
 });
 
@@ -523,6 +749,20 @@ test("loopback UI requires a session token and validates edits and stale revisio
     }),
   });
   assert.equal(staleMetadata.status, 409);
+  const branchEdit = await fetch(`${base}/api/branch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      revision: afterMetadata.revision,
+      name: "two",
+      branchName: "yperess/two",
+    }),
+  });
+  assert.equal(branchEdit.status, 200);
+  assert.equal(
+    (await branchEdit.json()).groups.find((g) => g.name === "two").branch,
+    "yperess/two",
+  );
   const page = await fetch(base);
   assert.match(
     page.headers.get("content-security-policy"),
@@ -570,6 +810,18 @@ test("VS Code process bridge reads the graph and applies validated dependency ed
   assert.equal(
     metadata.commits.find((c) => c.sha === a).effectiveMetadata.description,
     "VS Code body\n\nMore text",
+  );
+  const renamed = request({
+    route: "branch",
+    data: {
+      revision: metadata.revision,
+      name: "one",
+      branchName: "yperess/one",
+    },
+  });
+  assert.equal(
+    renamed.groups.find((g) => g.name === "one").branch,
+    "yperess/one",
   );
   assert.throws(
     () =>

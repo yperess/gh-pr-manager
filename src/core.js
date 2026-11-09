@@ -5,6 +5,34 @@ import { randomUUID } from "node:crypto";
 
 export const NOTES = "refs/notes/prm";
 
+// Deliberately not shell syntax: never execute or expand repository config.
+export function parseConfig(text) {
+  let branchPrefix = "prm/";
+  let seen = false;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const match = line.match(/^BRANCH_PREFIX\s*=\s*(.*?)\s*$/);
+    if (!match || seen)
+      throw new Error(
+        "Invalid .ghprm: expected a single BRANCH_PREFIX=value setting.",
+      );
+    seen = true;
+    let value = match[1];
+    if (value.startsWith('"')) {
+      try {
+        value = JSON.parse(value);
+      } catch {
+        throw new Error("Invalid JSON string in .ghprm BRANCH_PREFIX.");
+      }
+      if (typeof value !== "string")
+        throw new Error("BRANCH_PREFIX must be text.");
+    }
+    branchPrefix = value ? `${value.replace(/\/$/, "")}/` : "";
+  }
+  return { branchPrefix };
+}
+
 export function run(command, args, cwd, options = {}) {
   const result = spawnSync(command, args, {
     cwd,
@@ -29,7 +57,7 @@ function noteEntries(text) {
   const entries = [];
   for (let i = 0; i < lines.length; i++) {
     const match = lines[i].match(
-      /^prm-(name|deps|title|description):[ \t]*(.*)$/,
+      /^prm-(name|deps|title|description|branch-name):[ \t]*(.*)$/,
     );
     const entry = {
       key: match?.[1] || null,
@@ -43,20 +71,23 @@ function noteEntries(text) {
         body.push(lines[i].slice(2));
       }
       entry.value = body.join("\n");
-    } else if (entry.key === "description" && entry.value?.startsWith('"')) {
+    } else if (
+      ["description", "branch-name"].includes(entry.key) &&
+      entry.value?.startsWith('"')
+    ) {
       try {
         entry.value = JSON.parse(entry.value);
       } catch {
-        throw new Error("Invalid JSON string in prm-description.");
+        throw new Error(`Invalid JSON string in prm-${entry.key}.`);
       }
       if (typeof entry.value !== "string")
-        throw new Error("prm-description must contain text.");
+        throw new Error(`prm-${entry.key} must contain text.`);
     } else if (entry.key === "description" && entry.value === "") {
       // Also accept a manually written, unindented multiline description.
       const body = [];
       while (
         i + 1 < lines.length &&
-        !/^prm-(name|deps|title|description):/.test(lines[i + 1])
+        !/^prm-(name|deps|title|description|branch-name):/.test(lines[i + 1])
       ) {
         entry.raw.push(lines[++i]);
         body.push(lines[i]);
@@ -80,7 +111,7 @@ export function parseNote(text) {
       .map((d) => d.trim())
       .filter(Boolean),
   );
-  for (const key of ["title", "description"]) {
+  for (const key of ["title", "description", "branch-name"]) {
     if (values(key).length > 1)
       throw new Error(`A commit may have only one prm-${key}.`);
   }
@@ -89,6 +120,7 @@ export function parseNote(text) {
     deps: [...new Set(deps)],
     title: values("title")[0] ?? null,
     description: values("description")[0] ?? null,
+    branchName: values("branch-name")[0] ?? null,
   };
 }
 
@@ -119,6 +151,8 @@ export function editMetadataNote(text, updates) {
   // A JSON string keeps multiline Markdown and literal prm-* lines lossless.
   if (typeof updates.description === "string")
     lines.push(`prm-description: ${JSON.stringify(updates.description)}`);
+  if (typeof updates["branch-name"] === "string")
+    lines.push(`prm-branch-name: ${JSON.stringify(updates["branch-name"])}`);
   return lines.filter(Boolean).join("\n");
 }
 
@@ -182,6 +216,65 @@ export class Manager {
   }
   branch() {
     return this.git("symbolic-ref", "--quiet", "--short", "HEAD");
+  }
+  config() {
+    const file = path.join(this.root, ".ghprm");
+    const config = parseConfig(
+      fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "",
+    );
+    this.validBranch(`${config.branchPrefix}feature`);
+    return config;
+  }
+  validBranch(name) {
+    if (
+      typeof name !== "string" ||
+      name === "HEAD" ||
+      name.startsWith("-") ||
+      this.optionalGit("check-ref-format", `refs/heads/${name}`) === null
+    )
+      throw new Error(`Invalid branch name: ${JSON.stringify(name)}.`);
+  }
+  resolveBranches(groups, state, config) {
+    const owners = new Map([
+      [state.base, "the base branch"],
+      [state.branch, "the working branch"],
+    ]);
+    const claim = (branch, owner) => {
+      for (const [other, otherOwner] of owners) {
+        if (branch === other && owner === otherOwner) continue;
+        if (
+          branch === other ||
+          branch.startsWith(`${other}/`) ||
+          other.startsWith(`${branch}/`)
+        )
+          throw new Error(
+            `Branch ${branch} conflicts with ${otherOwner} (${other}).`,
+          );
+      }
+      owners.set(branch, owner);
+    };
+    for (const [name, feature] of Object.entries(state.features)) {
+      claim(feature.branch, name);
+    }
+    for (const group of groups) {
+      const published = Object.hasOwn(state.features, group.name)
+        ? state.features[group.name]
+        : null;
+      if (
+        published &&
+        group.branchName !== null &&
+        group.branchName !== published.branch
+      )
+        throw new Error(
+          `Cannot rename published feature ${group.name} from ${published.branch}.`,
+        );
+      group.branch =
+        group.branchName ??
+        published?.branch ??
+        `${config.branchPrefix}${group.name}`;
+      this.validBranch(group.branch);
+      claim(group.branch, group.name);
+    }
   }
   state() {
     if (!fs.existsSync(this.statePath))
@@ -343,6 +436,7 @@ export class Manager {
   }
   graph() {
     const state = this.state();
+    const config = this.config();
     this.onBranch(state);
     const commits = this.commits(state);
     const map = new Map();
@@ -358,8 +452,14 @@ export class Manager {
           description: null,
           titleSource: null,
           descriptionSource: null,
+          branchName: null,
+          branchNameSource: null,
         });
       const group = map.get(commit.name);
+      if (commit.branchName !== null) {
+        group.branchName = commit.branchName;
+        group.branchNameSource = commit.sha;
+      }
       group.commits.push(commit.sha);
       group.deps = [...new Set([...group.deps, ...commit.deps])];
       for (const field of ["title", "description"])
@@ -390,13 +490,15 @@ export class Manager {
         status: published?.state || (blockedBy.length ? "BLOCKED" : "READY"),
       };
     });
+    this.resolveBranches(groups, state, config);
     return {
+      config,
       branch: state.branch,
       base: state.base,
       remote: state.remote,
       repo: state.repo,
       head: this.head(),
-      revision: `${this.head()}:${this.optionalGit("rev-parse", "--verify", NOTES) || ""}`,
+      revision: `${this.head()}:${this.optionalGit("rev-parse", "--verify", NOTES) || ""}:${config.branchPrefix}`,
       commits,
       groups,
       merged: state.merged,
@@ -445,10 +547,13 @@ export class Manager {
       for (const c of hypothetical)
         if (c.name) {
           if (!groups.has(c.name))
-            groups.set(c.name, { name: c.name, deps: [] });
+            groups.set(c.name, { name: c.name, deps: [], branchName: null });
           groups.get(c.name).deps.push(...c.deps);
+          if (c.branchName !== null)
+            groups.get(c.name).branchName = c.branchName;
         }
       validateGraph([...groups.values()], graph.merged);
+      this.resolveBranches([...groups.values()], this.state(), graph.config);
       for (const [sha, note] of edits) this.writeNote(sha, note);
       return this.graph();
     });
@@ -479,6 +584,33 @@ export class Manager {
         this.writeNote(
           sha,
           editNote(this.note(sha), name, i === 0 ? deps : []),
+        );
+      return this.graph();
+    });
+  }
+  branchName(name, branchName, expectedRevision) {
+    return this.locked(() => {
+      const graph = this.graph();
+      if (expectedRevision && expectedRevision !== graph.revision)
+        throw new Error("The repository changed. Refresh before editing.");
+      if (branchName !== null) this.validBranch(branchName);
+      const group = graph.groups.find((g) => g.name === name);
+      if (!group) throw new Error(`Unknown feature ${name}.`);
+      const state = this.state();
+      this.resolveBranches(
+        graph.groups.map((g) =>
+          g.name === name ? { ...g, branchName } : { ...g },
+        ),
+        state,
+        graph.config,
+      );
+      // Keep one canonical branch override, preserving all other fields.
+      for (const [i, sha] of group.commits.entries())
+        this.writeNote(
+          sha,
+          editMetadataNote(this.note(sha), {
+            "branch-name": i === 0 ? branchName : null,
+          }),
         );
       return this.graph();
     });
@@ -627,6 +759,59 @@ export class Manager {
       ]),
     );
   }
+  verifyAdoption(state, group, head, existing) {
+    if (group.branchName === null || !group.ready)
+      throw new Error(
+        `Remote branch ${group.branch} already exists. Set prm-branch-name explicitly to adopt a matching ready feature.`,
+      );
+    const incoming = `refs/prm/adopt/${randomUUID()}`;
+    try {
+      this.git(
+        "fetch",
+        "--no-tags",
+        state.remote,
+        `refs/heads/${group.branch}:${incoming}`,
+      );
+      if (this.git("rev-parse", incoming) !== existing)
+        throw new Error(
+          `Remote branch ${group.branch} changed while checking adoption. Retry.`,
+        );
+      const base = this.baseRef(state);
+      const commits = this.git("rev-list", `${base}..${incoming}`)
+        .split("\n")
+        .filter(Boolean);
+      const patches = (ref) =>
+        run("git", ["patch-id", "--stable"], this.root, {
+          input: this.git(
+            "log",
+            "--reverse",
+            "--format=medium",
+            "--no-ext-diff",
+            "--no-textconv",
+            "-p",
+            `${base}..${ref}`,
+          ),
+        })
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => line.split(" ")[0])
+          .join("\n");
+      if (
+        this.optionalGit("merge-base", "--is-ancestor", base, incoming) ===
+          null ||
+        this.git("rev-list", "--merges", `${base}..${incoming}`) ||
+        commits.length !== group.commits.length ||
+        this.git("rev-parse", `${incoming}^{tree}`) !==
+          this.git("rev-parse", `${head}^{tree}`) ||
+        patches(incoming) !== patches(head)
+      )
+        throw new Error(
+          `Remote branch ${group.branch} does not match this feature's commits. Refusing to overwrite it.`,
+        );
+    } finally {
+      this.optionalGit("update-ref", "-d", incoming);
+    }
+  }
   push({ dryRun = false, names = [] } = {}) {
     return this.locked(() => {
       const state = this.state();
@@ -705,10 +890,12 @@ export class Manager {
           }
           projections.at(-1).head = run("git", ["rev-parse", "HEAD"], dir);
         }
-        for (const { group, head } of projections) {
+        // Validate every branch and existing PR before the first remote write.
+        for (const projection of projections) {
+          const { group } = projection;
           const feature = Object.hasOwn(state.features, group.name)
             ? state.features[group.name]
-            : { branch: `prm/${group.name}` };
+            : { branch: group.branch };
           const remoteRef = `refs/heads/${feature.branch}`;
           const existing = this.git(
             "ls-remote",
@@ -716,15 +903,59 @@ export class Manager {
             state.remote,
             remoteRef,
           ).split(/\s/)[0];
-          if (existing && existing !== feature.publishedHead)
-            throw new Error(
-              `Remote branch ${feature.branch} changed outside prm. Refusing to overwrite it.`,
+          if (existing && existing !== feature.publishedHead) {
+            if (feature.publishedHead)
+              throw new Error(
+                `Remote branch ${feature.branch} changed outside prm. Refusing to overwrite it.`,
+              );
+            this.verifyAdoption(state, group, projection.head, existing);
+            // Keep the existing commit IDs on initial adoption.
+            projection.head = existing;
+          }
+          projection.expectedHead = feature.publishedHead || existing || "";
+          projection.feature = feature;
+          if (!feature.pr && group.ready) {
+            const prs = JSON.parse(
+              this.gh([
+                "pr",
+                "list",
+                "--repo",
+                state.repo,
+                "--head",
+                feature.branch,
+                "--state",
+                "open",
+                "--json",
+                "number,url,baseRefName",
+              ]),
             );
-          const lease = `--force-with-lease=${remoteRef}:${feature.publishedHead || ""}`;
+            if (
+              prs.length > 1 ||
+              (prs.length === 1 && prs[0].baseRefName !== state.base)
+            )
+              throw new Error(
+                `Could not identify a unique PR against ${state.base} for ${group.name}.`,
+              );
+            projection.existingPr = prs[0];
+          }
+        }
+        for (const {
+          group,
+          head,
+          feature,
+          expectedHead,
+          existingPr,
+        } of projections) {
+          const remoteRef = `refs/heads/${feature.branch}`;
+          const lease = `--force-with-lease=${remoteRef}:${expectedHead}`;
           this.git("push", lease, state.remote, `${head}:${remoteRef}`);
           feature.publishedHead = head;
           feature.publishedCommits = group.commits;
           feature.state = group.ready ? "OPEN" : "PREVIEW";
+          if (existingPr) {
+            feature.pr = existingPr.number;
+            feature.url = existingPr.url;
+          }
           state.features[group.name] = feature;
           this.save(state); // Recover a pushed branch if PR creation fails.
           if (!group.ready) {
@@ -793,6 +1024,7 @@ export class Manager {
           }
           result.pushed.push({
             name: group.name,
+            branch: feature.branch,
             pr: feature.pr,
             url: feature.url,
             commits: group.commits,

@@ -7,6 +7,7 @@ const help = `gh prm — parallel PRs from a single working branch
   init --base BRANCH [--remote origin] [--repo https://HOST/OWNER/REPO]
   tag FEATURE [COMMIT ...]         Assign commits (defaults to HEAD)
   deps FEATURE [DEPENDENCY ...]    Replace dependencies; --clear removes all
+  branch FEATURE NAME             Set full branch name; --clear uses the default
   status [--json]                  Show groups and readiness (local snapshot)
   push [FEATURE ...] [--dry-run]   Publish ready groups; named blocked groups get
                                   full-history preview branches, without PRs
@@ -73,6 +74,11 @@ export async function main(argv = process.argv.slice(2)) {
     case "status":
       result = manager.graph();
       break;
+    case "branch":
+      if (args.length !== (values.clear ? 1 : 2))
+        throw new Error("Use branch FEATURE NAME or branch FEATURE --clear.");
+      result = manager.branchName(args[0], values.clear ? null : args[1]);
+      break;
     case "push":
       result = manager.push({ dryRun: values["dry-run"], names: args });
       break;
@@ -115,7 +121,7 @@ export async function main(argv = process.argv.slice(2)) {
     console.log(`${result.branch} → ${result.base}\n`);
     for (const g of result.groups)
       console.log(
-        `${g.ready ? "●" : "○"} ${g.name}  ${g.commits.length} commit(s)  ${g.pr ? `PR #${g.pr}` : g.status}${g.blockedBy.length ? `  waits for ${g.blockedBy.join(", ")}` : ""}`,
+        `${g.ready ? "●" : "○"} ${g.name}  → ${g.branch}  ${g.commits.length} commit(s)  ${g.pr ? `PR #${g.pr}` : g.status}${g.blockedBy.length ? `  waits for ${g.blockedBy.join(", ")}` : ""}`,
       );
     const unassigned = result.commits.filter((c) => !c.name);
     if (unassigned.length)
