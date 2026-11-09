@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PR Manager</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="logo">◈</span><div><h1>PR Manager</h1><p id="repository">Connecting to your repository…</p></div></div>
+    <div class="tools"><span class="local">● Local session</span><button id="refresh">Refresh</button></div>
+  </header>
+  <div id="error" role="alert" hidden></div>
+  <main>
+    <section class="canvas-panel">
+      <div class="section-heading"><div><h2>Feature dependencies</h2><p>Independent features can be reviewed together. Arrows point from prerequisite to dependent.</p></div><div id="counts"></div></div>
+      <div class="legend"><span><i class="ready"></i>Ready</span><span><i class="open"></i>In review</span><span><i class="blocked"></i>Waiting</span><span><i class="merged"></i>Merged</span></div>
+      <div id="graph-wrap"><svg id="graph" aria-label="Feature dependency graph" role="img"></svg><p id="empty" hidden>No grouped commits yet. Select commits below and assign a feature.</p></div>
+      <div class="section-heading history-heading"><div><h2>Commit history</h2><p>Oldest first · colors connect commits to their PR group</p></div><span id="branch" class="branch"></span></div>
+      <div class="history-table"><table><thead><tr><th aria-label="Select"></th><th>Commit</th><th>Message</th><th>Feature</th><th>PR metadata</th></tr></thead><tbody id="commits"></tbody></table></div>
+    </section>
+    <aside>
+      <div class="section-heading"><h2 id="inspector-title">Manage a feature</h2></div>
+      <p id="inspector-hint" class="muted">Select a feature in the graph to edit its dependencies.</p>
+      <div id="inspector" hidden>
+        <div id="feature-state" class="badge"></div>
+        <a id="pr-link" target="_blank" rel="noopener noreferrer" hidden>Open pull request ↗</a>
+        <h3>Current PR title</h3><p id="feature-title"></p><p id="feature-title-source" class="muted"></p>
+        <h3>Current PR description</h3><p id="feature-description" class="metadata-preview"></p><p id="feature-description-source" class="muted"></p>
+        <h3>Prerequisites</h3><p class="muted">All selected features must merge before this feature is published.</p>
+        <form id="deps-form"><fieldset id="deps-options"></fieldset><button class="primary" type="submit">Save dependencies</button></form>
+      </div>
+      <div class="assign">
+        <h3>Group selected commits</h3><p class="muted">Commit notes store the feature assignment. Your commit contents stay the same.</p>
+        <form id="tag-form"><label for="feature-name">Feature name</label><input id="feature-name" placeholder="e.g. interface-builder" required pattern="[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}" maxlength="80"><button type="submit" id="tag-button">Assign selected commits</button></form>
+      </div>
+      <div class="workflow"><h3>Next commands</h3><code>gh prm push --dry-run</code><code>gh prm push</code><code>gh prm sync</code><p class="muted">This editor changes notes only. Publishing and syncing are explicit CLI actions.</p></div>
+    </aside>
+    <section class="diff-panel"><div class="section-heading"><h2 id="diff-title">Commit details</h2><span class="muted">Select a commit to inspect its effective PR metadata and patch</span></div>
+      <div id="metadata-panel" hidden>
+        <h3>PR metadata at this commit</h3><p id="metadata-context" class="muted"></p>
+        <form id="metadata-form"><fieldset id="metadata-fields">
+          <label class="dependency-option"><input type="checkbox" id="title-override"> Override title at this commit</label>
+          <input id="metadata-title" type="text" maxlength="256" aria-label="PR title at selected commit"><p id="title-source" class="muted"></p>
+          <label class="dependency-option"><input type="checkbox" id="description-override"> Override description at this commit</label>
+          <textarea id="metadata-description" rows="7" aria-label="PR description at selected commit" placeholder="The generated PR description will be used if no commit sets one."></textarea><p id="description-source" class="muted"></p>
+          <p class="muted">Unchecked fields inherit earlier values from this feature. An enabled, empty description explicitly clears it. Later commits may override either field again.</p>
+          <button type="submit" class="primary">Save commit metadata</button>
+        </fieldset></form><p class="muted">Saved in Git notes. Existing GitHub PR titles and descriptions are not changed.</p>
+      </div>
+      <pre id="diff">No commit selected.</pre>
+    </section>
+  </main>
+  <footer><span id="notice" role="status">Loading…</span><span>Notes: refs/notes/prm</span></footer>
+</body>
+</html>

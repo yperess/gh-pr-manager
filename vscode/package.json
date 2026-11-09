@@ -1,0 +1,42 @@
+{
+  "name": "pr-manager",
+  "displayName": "PR Manager",
+  "description": "View and edit commit-note PR groups and their dependency graph",
+  "version": "0.1.0",
+  "publisher": "yperess",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.cjs",
+  "activationEvents": [
+    "onCommand:prm.view"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "prm.view",
+        "title": "PR Manager: Open Dependency Graph"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yperess/gh-pr-manager.git"
+  },
+  "license": "MIT",
+  "files": [
+    "extension.cjs",
+    "runtime/**",
+    "README.md",
+    "LICENSE"
+  ]
+}

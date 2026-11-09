@@ -1,0 +1,29 @@
+{
+  "name": "gh-pr-manager",
+  "version": "0.1.0",
+  "description": "Commit-note driven parallel pull request workflows",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "gh-pr-manager": "gh-pr-manager",
+    "gh-prm": "gh-prm"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check src/core.js && node --check src/cli.js && node --check src/server.js && node --check ui/app.js && node --check vscode/extension.cjs",
+    "package:vscode": "node scripts/package-vscode.js",
+    "format": "prettier --write \"src/*.js\" \"ui/*.js\" \"ui/*.css\" \"scripts/*.js\" \"test/*.js\" \"vscode/*.cjs\" \"vscode/*.json\" package.json",
+    "format:check": "prettier --check \"src/*.js\" \"ui/*.js\" \"ui/*.css\" \"scripts/*.js\" \"test/*.js\" \"vscode/*.cjs\" \"vscode/*.json\" package.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yperess/gh-pr-manager.git"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "linkedom": "0.18.12",
+    "prettier": "3.6.2"
+  }
+}
