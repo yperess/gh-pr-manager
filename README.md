@@ -226,7 +226,7 @@ session token for API calls, rejects foreign origins, and uses no external asset
 
 ```sh
 npm run package:vscode
-code --install-extension dist/pr-manager-0.1.0.vsix
+code --install-extension dist/pr-manager-0.1.0.vsix --force
 ```
 
 Packaging uses the pinned `@vscode/vsce` packager through `npx` (network needed
@@ -239,6 +239,114 @@ Open a trusted local workspace, initialize it using the CLI, then run
 the same assignment, dependency editing, and patch inspection controls as the
 browser app. Git commands run in a separate process. Multi-root workspaces
 prompt for the repository to view.
+
+## Publish the VS Code extension
+
+The GitHub repository and local VSIX are separate from the VS Code Marketplace.
+Publishing to the Marketplace makes the extension discoverable in VS Code's
+Extensions search. This repository does not yet configure a publishing workflow;
+building the package does not publish it.
+
+### Register a Marketplace publisher
+
+1. Sign in with your Microsoft account at the
+   [Marketplace publisher management portal](https://marketplace.visualstudio.com/manage).
+2. Create a publisher. Use `yperess` if available: the current
+   `vscode/package.json` declares `"publisher": "yperess"` and
+   `"name": "pr-manager"`, giving the extension ID **`yperess.pr-manager`**.
+   A different publisher ID requires updating the manifest and rebuilding.
+3. Keep that publisher ID stable for subsequent releases and IT approval.
+
+Publisher registration is still pending. If Microsoft blocks account creation
+or a human-verification challenge blocks the session, resolve that through
+Microsoft's account support before continuing. Publishing credentials and
+Trusted Publishing cannot replace the initial account/publisher setup. The
+local browser editor remains available with `gh prm view`, subject to your
+organization's policies.
+
+### Prepare the listing and package
+
+Before the first Marketplace release, add an extension-focused README,
+screenshots, search keywords, and ideally a PNG icon. Consider setting
+`"preview": true` in the extension manifest for this initial release.
+The current packaging script copies the repository README into the VSIX.
+
+From the repository root:
+
+```sh
+npm ci
+npm test
+npm run check
+npm run format:check
+npm run package:vscode
+```
+
+The current artifact is `dist/pr-manager-0.1.0.vsix`. For later releases, update
+`vscode/package.json` and the packaging script's output filename together.
+Never publish a changed package under an already-published version.
+
+### Publish and maintain releases
+
+Use [Microsoft's publishing instructions](https://code.visualstudio.com/api/working-with-extensions/publishing-extension)
+to publish the built VSIX. For repeatable releases, configure GitHub Actions
+Trusted Publishing:
+
+1. In the publisher portal, add a Trusted Publishing policy for repository owner
+   `yperess`, repository `gh-pr-manager`, and the exact release workflow filename.
+   If using a GitHub environment, its name must also match the policy.
+2. Add a release workflow that checks out the repository, installs Node.js and
+   development dependencies, runs the checks above, and builds the VSIX.
+3. Give the publishing job `contents: read` and `id-token: write` permissions.
+4. Use a version of `@vscode/vsce` supporting Trusted Publishing to publish with
+   `--oidc` and `--packagePath dist/pr-manager-0.1.0.vsix`. The existing pinned
+   packaging tool is not itself a configured release workflow; verify publishing
+   support when adding that workflow.
+5. After publication, verify the listing, publisher, version, and installation
+   from VS Code's Extensions search before announcing the release.
+
+Trusted Publishing avoids storing a long-lived publishing token. Follow the
+linked documentation for the current authentication requirements.
+
+## Enterprise approval and local installation
+
+Marketplace publication does not automatically grant employer approval. Give
+IT the published Marketplace listing, the exact extension ID, the version to
+review, and [this source repository](https://github.com/yperess/gh-pr-manager).
+
+VS Code administrators can allow a specific extension through their managed
+`extensions.allowed` policy, including pinning it to approved versions. For
+example, merge this entry into the organization's existing policy:
+
+```json
+{
+  "extensions.allowed": {
+    "yperess.pr-manager": ["0.1.0"]
+  }
+}
+```
+
+The ID above assumes the `yperess` publisher is registered and retained. IT can
+instead approve all versions of this extension with `"yperess.pr-manager": true`.
+Request approval for this extension specifically; approving every extension
+from the publisher is broader. See
+[Microsoft's enterprise extension controls](https://code.visualstudio.com/docs/enterprise/extensions)
+for managed-policy configuration. Do not replace the employer's policy with
+this example or assume changing a user setting will override it.
+
+For the review, provide the MIT license, source revision, test results, and VSIX
+artifact. The VS Code view reads local Git history, edits Git notes, and invokes
+local Git/gh subprocesses in trusted workspaces. Publishing PRs and rewriting
+history are separate CLI actions. Include these behaviors in the review;
+Marketplace availability does not reduce the extension's runtime permissions.
+
+Once IT permits the installation, users can install the published extension
+from Extensions search. For an approved local VSIX, open **Extensions → … →
+Install from VSIX…** and select `dist/pr-manager-0.1.0.vsix`.
+
+If `code` is unavailable in a macOS terminal, run **Shell Command: Install 'code'
+command in PATH** from VS Code's Command Palette, then open a new terminal. The
+Extensions UI installation path does not require the `code` command. After
+installation, run **PR Manager: Open Dependency Graph** from the Command Palette.
 
 ## Development and scope
 
