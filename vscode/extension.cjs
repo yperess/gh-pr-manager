@@ -1,42 +1,13 @@
 const vscode = require("vscode");
 const fs = require("node:fs");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
+const { pathToFileURL } = require("node:url");
 
-function request(cwd, bridge, message) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [bridge], {
-      cwd,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    let out = "",
-      err = "";
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error("PR Manager timed out."));
-    }, 30000);
-    child.stdout.on("data", (b) => {
-      out += b;
-    });
-    child.stderr.on("data", (b) => {
-      err += b;
-    });
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      reject(e);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code) return reject(new Error(err || "PR Manager failed."));
-      try {
-        resolve(JSON.parse(out));
-      } catch (e) {
-        reject(e);
-      }
-    });
-    child.stdin.end(JSON.stringify(message));
-  });
+async function request(cwd, bridge, message, onProgress, options) {
+  const { requestBridge } = await import(
+    pathToFileURL(path.join(path.dirname(bridge), "operations.js")).href
+  );
+  return requestBridge(cwd, bridge, message, onProgress, options);
 }
 
 function activate(context) {
@@ -84,22 +55,41 @@ function activate(context) {
           `<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${source}; style-src ${source}; img-src ${source}; base-uri 'none'; form-action 'none';">`,
         )
         .replace('href="/style.css"', `href="${uri("style.css")}"`)
+        .replace('src="/diff.js"', `src="${uri("diff.js")}"`)
         .replace('src="/app.js"', `src="${uri("app.js")}"`);
+      const running = new Set();
       const listener = panel.webview.onDidReceiveMessage(async (message) => {
         if (!Number.isInteger(message?.id)) return;
+        const controller = new AbortController();
+        running.add(controller);
         try {
+          if (!vscode.workspace.isTrusted)
+            throw new Error("Trust this workspace before using PR Manager.");
           await panel.webview.postMessage({
             id: message.id,
-            result: await request(folder.uri.fsPath, bridge, message),
+            result: await request(
+              folder.uri.fsPath,
+              bridge,
+              message,
+              (event) => {
+                panel.webview.postMessage({ id: message.id, progress: event });
+              },
+              { signal: controller.signal },
+            ),
           });
         } catch (error) {
           await panel.webview.postMessage({
             id: message.id,
             error: error.message,
           });
+        } finally {
+          running.delete(controller);
         }
       });
-      panel.onDidDispose(() => listener.dispose());
+      panel.onDidDispose(() => {
+        listener.dispose();
+        for (const controller of running) controller.abort();
+      });
       panel.webview.html = html;
     }),
   );

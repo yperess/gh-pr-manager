@@ -1,7 +1,9 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+
+import { readPushRun, assertPushRunOwner } from "./push-run.js";
 
 export const NOTES = "refs/notes/prm";
 
@@ -34,12 +36,13 @@ export function parseConfig(text) {
 }
 
 export function run(command, args, cwd, options = {}) {
+  const { trimEnd = true, ...processOptions } = options;
   const result = spawnSync(command, args, {
     cwd,
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024,
     env: { ...process.env, GH_PROMPT_DISABLED: "1", GIT_TERMINAL_PROMPT: "0" },
-    ...options,
+    ...processOptions,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -49,7 +52,7 @@ export function run(command, args, cwd, options = {}) {
     error.status = result.status;
     throw error;
   }
-  return result.stdout.trimEnd();
+  return trimEnd ? result.stdout.trimEnd() : result.stdout;
 }
 
 function noteEntries(text) {
@@ -188,7 +191,8 @@ export function validateGraph(groups, merged = {}) {
 }
 
 export class Manager {
-  constructor(cwd = process.cwd(), gh) {
+  constructor(cwd = process.cwd(), gh, { onProgress } = {}) {
+    this.onProgress = onProgress;
     this.root = run("git", ["rev-parse", "--show-toplevel"], cwd);
     this.common = path.resolve(
       this.root,
@@ -197,11 +201,32 @@ export class Manager {
     this.dir = path.join(this.common, "prm");
     this.statePath = path.join(this.dir, "state.json");
     this.journalPath = path.join(this.dir, "sync.json");
-    this.gh = gh || ((args) => run("gh", args, this.root));
+    const invokeGh = gh || ((args) => run("gh", args, this.root));
+    this.gh = (args) => {
+      // Titles/descriptions and repository credentials never belong in the log.
+      this.progress(
+        `gh ${args.slice(0, args[0] === "pr" && args[1] === "view" ? 3 : 2).join(" ")}`,
+      );
+      return invokeGh(args);
+    };
   }
 
   git(...args) {
+    if (
+      [
+        "fetch",
+        "push",
+        "ls-remote",
+        "worktree",
+        "update-ref",
+        "reset",
+      ].includes(args[0])
+    )
+      this.progress(`git ${args.join(" ")}`);
     return run("git", args, this.root);
+  }
+  progress(command) {
+    this.onProgress?.({ command });
   }
   optionalGit(...args) {
     try {
@@ -498,11 +523,12 @@ export class Manager {
       remote: state.remote,
       repo: state.repo,
       head: this.head(),
-      revision: `${this.head()}:${this.optionalGit("rev-parse", "--verify", NOTES) || ""}:${config.branchPrefix}`,
+      revision: `${this.head()}:${this.optionalGit("rev-parse", "--verify", NOTES) || ""}:${config.branchPrefix}:${createHash("sha256").update(JSON.stringify(state)).digest("hex")}`,
       commits,
       groups,
       merged: state.merged,
       paused: fs.existsSync(this.journalPath),
+      pushRun: readPushRun(this),
     };
   }
   tag(name, revisions = ["HEAD"]) {
@@ -699,8 +725,12 @@ export class Manager {
       return { notes: direction };
     });
   }
-  plan() {
+  plan(expectedRevision) {
     const graph = this.graph();
+    if (expectedRevision && expectedRevision !== graph.revision)
+      throw new Error(
+        "The repository changed. Refresh and preview the push again.",
+      );
     validateGraph(graph.groups, graph.merged);
     return {
       ready: graph.groups.filter((g) => g.ready),
@@ -718,6 +748,7 @@ export class Manager {
     this.git("worktree", "remove", "--force", dir);
   }
   replay(dir, sha) {
+    this.progress(`git cherry-pick ${sha}`);
     const [name, email, date] = this.git(
       "show",
       "-s",
@@ -759,8 +790,57 @@ export class Manager {
       ]),
     );
   }
-  verifyAdoption(state, group, head, existing) {
-    if (group.branchName === null || !group.ready)
+  patchSignature(commits) {
+    return JSON.stringify(
+      commits.map((sha) => [
+        run("git", ["patch-id", "--stable"], this.root, {
+          input: this.git(
+            "show",
+            "--format=medium",
+            "--no-ext-diff",
+            "--no-textconv",
+            sha,
+            "--",
+          ),
+        }).split(" ")[0],
+      ]),
+    );
+  }
+  unchangedProjection(state, group, feature, projection) {
+    const previous = feature.publishedCommits;
+    if (!Array.isArray(previous) || previous.length !== group.commits.length)
+      return false;
+    if (previous.every((sha, i) => sha === group.commits[i])) return true;
+    // Sync changes source SHAs. Compare exact replayed trees, including whitespace,
+    // at every commit rather than trusting patch IDs (which ignore whitespace).
+    if (
+      previous.some(
+        (sha, i) =>
+          this.git("show", "-s", "--format=%B", sha) !==
+          this.git("show", "-s", "--format=%B", group.commits[i]),
+      )
+    )
+      return false;
+    const dir = this.createWorktree(this.baseRef(state));
+    try {
+      for (let i = 0; i < previous.length; i++) {
+        try {
+          this.replay(dir, previous[i]);
+        } catch {
+          return false;
+        }
+        if (
+          run("git", ["rev-parse", "HEAD^{tree}"], dir) !== projection.trees[i]
+        )
+          return false;
+      }
+      return true;
+    } finally {
+      this.removeWorktree(dir);
+    }
+  }
+  verifyAdoption(state, group, existing, { explicit = false } = {}) {
+    if ((!explicit && group.branchName === null) || !group.ready)
       throw new Error(
         `Remote branch ${group.branch} already exists. Set prm-branch-name explicitly to adopt a matching ready feature.`,
       );
@@ -776,35 +856,29 @@ export class Manager {
         throw new Error(
           `Remote branch ${group.branch} changed while checking adoption. Retry.`,
         );
-      const base = this.baseRef(state);
-      const commits = this.git("rev-list", `${base}..${incoming}`)
+      // Compare the feature at the remote branch's own base. An existing PR
+      // need not have rebased onto the latest trunk to be safely adopted.
+      const base = this.git("merge-base", this.baseRef(state), incoming);
+      const commits = this.git("rev-list", "--reverse", `${base}..${incoming}`)
         .split("\n")
         .filter(Boolean);
-      const patches = (ref) =>
-        run("git", ["patch-id", "--stable"], this.root, {
-          input: this.git(
-            "log",
-            "--reverse",
-            "--format=medium",
-            "--no-ext-diff",
-            "--no-textconv",
-            "-p",
-            `${base}..${ref}`,
-          ),
-        })
-          .split("\n")
-          .filter(Boolean)
-          .map((line) => line.split(" ")[0])
-          .join("\n");
+      let equivalent = false;
       if (
-        this.optionalGit("merge-base", "--is-ancestor", base, incoming) ===
-          null ||
-        this.git("rev-list", "--merges", `${base}..${incoming}`) ||
-        commits.length !== group.commits.length ||
-        this.git("rev-parse", `${incoming}^{tree}`) !==
-          this.git("rev-parse", `${head}^{tree}`) ||
-        patches(incoming) !== patches(head)
-      )
+        !this.git("rev-list", "--merges", `${base}..${incoming}`) &&
+        commits.length === group.commits.length &&
+        this.patchSignature(commits) === this.patchSignature(group.commits)
+      ) {
+        const dir = this.createWorktree(base);
+        try {
+          for (const sha of group.commits) this.replay(dir, sha);
+          equivalent =
+            this.git("rev-parse", `${incoming}^{tree}`) ===
+            run("git", ["rev-parse", "HEAD^{tree}"], dir);
+        } finally {
+          this.removeWorktree(dir);
+        }
+      }
+      if (!equivalent)
         throw new Error(
           `Remote branch ${group.branch} does not match this feature's commits. Refusing to overwrite it.`,
         );
@@ -812,12 +886,127 @@ export class Manager {
       this.optionalGit("update-ref", "-d", incoming);
     }
   }
-  push({ dryRun = false, names = [] } = {}) {
+  adopt(name, number, { expectedRevision, expectedHead } = {}) {
+    if (
+      typeof name !== "string" ||
+      !Number.isSafeInteger(number) ||
+      number <= 0
+    )
+      throw new Error("Provide a feature name and a positive PR number.");
+    if (
+      expectedHead !== undefined &&
+      !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(expectedHead)
+    )
+      throw new Error("Provide the discovered PR head commit.");
     return this.locked(() => {
       const state = this.state();
       this.onBranch(state);
+      const graph = this.graph();
+      if (expectedRevision && graph.revision !== expectedRevision)
+        throw new Error(
+          "The repository changed. Refresh before adopting a PR.",
+        );
+      if (graph.paused)
+        throw new Error(
+          "Finish or abort the paused sync before adopting a PR.",
+        );
+      validateGraph(graph.groups, graph.merged);
+      const group = graph.groups.find((g) => g.name === name);
+      if (!group) throw new Error(`Unknown feature ${name}.`);
+      if (!group.ready)
+        throw new Error(`Merge prerequisites before adopting ${name}.`);
+      const previous = Object.hasOwn(state.features, name)
+        ? state.features[name]
+        : null;
+      if (previous?.pr) {
+        if (previous.pr !== number)
+          throw new Error(`${name} already tracks PR #${previous.pr}.`);
+        return { name, pr: number, url: previous.url, adopted: false, graph };
+      }
+      const readPr = () =>
+        JSON.parse(
+          this.gh([
+            "pr",
+            "view",
+            String(number),
+            "--repo",
+            state.repo,
+            "--json",
+            "number,url,state,baseRefName,headRefName,headRefOid,isCrossRepository",
+          ]),
+        );
+      const validatePr = (pr) => {
+        if (pr.number !== number || pr.state !== "OPEN")
+          throw new Error("Only an existing open PR can be adopted.");
+        if (
+          pr.isCrossRepository !== false ||
+          pr.headRefName !== group.branch ||
+          pr.baseRefName !== state.base
+        )
+          throw new Error(
+            `PR #${number} must use ${group.branch} in this repository and target ${state.base}.`,
+          );
+      };
+      const pr = readPr();
+      validatePr(pr);
+      if (expectedHead && pr.headRefOid !== expectedHead)
+        throw new Error(
+          "PR changed since discovery. Refresh before adopting it.",
+        );
+      this.fetch(state);
+      const remoteHead = () =>
+        this.git(
+          "ls-remote",
+          "--heads",
+          state.remote,
+          `refs/heads/${group.branch}`,
+        ).split(/\s/)[0];
+      const head = remoteHead();
+      if (!head || head !== pr.headRefOid)
+        throw new Error(
+          "PR head does not match the remote branch. Refresh before adopting it.",
+        );
+      if (previous?.publishedHead && previous.publishedHead !== head)
+        throw new Error(
+          `Remote branch ${group.branch} changed outside prm. Refusing to replace its tracking state.`,
+        );
+      // Explicit adoption authorizes the resolved branch name, including the default.
+      this.verifyAdoption(state, group, head, { explicit: true });
+      const latest = readPr();
+      validatePr(latest);
+      if (latest.headRefOid !== head || remoteHead() !== head)
+        throw new Error(
+          "PR or remote branch changed during adoption. Refresh and retry.",
+        );
+      if (this.graph().revision !== graph.revision)
+        throw new Error(
+          "The repository changed during adoption. Refresh and retry.",
+        );
+      state.features[name] = {
+        branch: group.branch,
+        pr: number,
+        url: latest.url,
+        state: "OPEN",
+        publishedHead: head,
+        publishedCommits: group.commits,
+      };
+      this.save(state);
+      return {
+        name,
+        pr: number,
+        url: latest.url,
+        adopted: true,
+        graph: this.graph(),
+      };
+    });
+  }
+  push({ dryRun = false, names = [], expectedRevision, beforePublish } = {}) {
+    return this.locked(() => {
+      assertPushRunOwner(this);
+      const state = this.state();
+      this.onBranch(state);
       this.clean();
-      const plan = this.plan();
+      const plan = this.plan(expectedRevision);
       if (this.commits(state).some((c) => c.parents.length > 1))
         throw new Error(
           "Merge commits are unsupported. Use a linear working branch.",
@@ -857,8 +1046,8 @@ export class Manager {
       ) {
         throw new Error("The base advanced. Run gh prm sync before pushing.");
       }
-      for (const feature of Object.values(state.features))
-        if (feature.pr) {
+      for (const [name, feature] of Object.entries(state.features))
+        if (feature.pr && (!this.pushRunId || names.includes(name))) {
           const pr = this.prStatus(state, feature);
           if (pr.state === "MERGED")
             throw new Error(`PR #${pr.number} merged. Run gh prm sync first.`);
@@ -880,9 +1069,15 @@ export class Manager {
             continue;
           }
           const dir = this.createWorktree(this.baseRef(state));
-          projections.push({ group, dir });
+          const projection = { group, dir, trees: [] };
+          projections.push(projection);
           try {
-            for (const sha of group.commits) this.replay(dir, sha);
+            for (const sha of group.commits) {
+              this.replay(dir, sha);
+              projection.trees.push(
+                run("git", ["rev-parse", "HEAD^{tree}"], dir),
+              );
+            }
           } catch (e) {
             throw new Error(
               `Cannot isolate ${group.name}. Add the missing dependency or make its commits independent.\n${e.message}`,
@@ -908,10 +1103,20 @@ export class Manager {
               throw new Error(
                 `Remote branch ${feature.branch} changed outside prm. Refusing to overwrite it.`,
               );
-            this.verifyAdoption(state, group, projection.head, existing);
+            this.verifyAdoption(state, group, existing);
             // Keep the existing commit IDs on initial adoption.
             projection.head = existing;
           }
+          if (
+            existing &&
+            existing === feature.publishedHead &&
+            group.ready &&
+            feature.state === "OPEN" &&
+            this.unchangedProjection(state, group, feature, projection)
+          ) {
+            projection.head = existing;
+          }
+          projection.existingHead = existing;
           projection.expectedHead = feature.publishedHead || existing || "";
           projection.feature = feature;
           if (!feature.pr && group.ready) {
@@ -945,10 +1150,22 @@ export class Manager {
           feature,
           expectedHead,
           existingPr,
+          existingHead,
         } of projections) {
+          beforePublish?.(group);
           const remoteRef = `refs/heads/${feature.branch}`;
           const lease = `--force-with-lease=${remoteRef}:${expectedHead}`;
-          this.git("push", lease, state.remote, `${head}:${remoteRef}`);
+          if (head !== existingHead) {
+            this.git("push", lease, state.remote, `${head}:${remoteRef}`);
+          } else if (
+            this.git("ls-remote", "--heads", state.remote, remoteRef).split(
+              /\s/,
+            )[0] !== head
+          ) {
+            throw new Error(
+              `Remote branch ${feature.branch} changed after preflight. Retry.`,
+            );
+          }
           feature.publishedHead = head;
           feature.publishedCommits = group.commits;
           feature.state = group.ready ? "OPEN" : "PREVIEW";
@@ -984,6 +1201,7 @@ export class Manager {
               ]),
             );
             if (!prs.length) {
+              beforePublish?.(group);
               this.gh([
                 "pr",
                 "create",
@@ -1043,12 +1261,203 @@ export class Manager {
     });
     fs.renameSync(tmp, this.journalPath);
   }
-  sync({ dryRun = false, continue: resume = false, abort = false } = {}) {
+  mergedPrForGroup(state, group) {
+    // Only reconcile names the user explicitly associated with an existing branch.
+    if (group.branchName === null) return null;
+    const candidates = JSON.parse(
+      this.gh([
+        "pr",
+        "list",
+        "--repo",
+        state.repo,
+        "--head",
+        group.branch,
+        "--base",
+        state.base,
+        "--state",
+        "merged",
+        "--limit",
+        "100",
+        "--json",
+        "number,headRefName,baseRefName,isCrossRepository",
+      ]),
+    ).filter(
+      (pr) =>
+        pr.isCrossRepository === false &&
+        pr.headRefName === group.branch &&
+        pr.baseRefName === state.base,
+    );
+    if (candidates.length > 1)
+      throw new Error(
+        `Multiple merged PRs match ${group.branch}. Refusing to guess which feature merged.`,
+      );
+    if (!candidates.length) return null;
+    const pr = JSON.parse(
+      this.gh([
+        "pr",
+        "view",
+        String(candidates[0].number),
+        "--repo",
+        state.repo,
+        "--json",
+        "number,url,state,mergedAt,mergeCommit,headRefOid,headRefName,baseRefName,isCrossRepository",
+      ]),
+    );
+    if (
+      pr.number !== candidates[0].number ||
+      pr.state !== "MERGED" ||
+      pr.isCrossRepository !== false ||
+      pr.headRefName !== group.branch ||
+      pr.baseRefName !== state.base
+    )
+      throw new Error(
+        `PR changed while checking ${group.name}. Refresh and retry.`,
+      );
+    return pr;
+  }
+  projectionMatches(commits, base, tree) {
+    const dir = this.createWorktree(base);
+    try {
+      for (const sha of commits) this.replay(dir, sha);
+      return run("git", ["rev-parse", "HEAD^{tree}"], dir) === tree;
+    } catch {
+      return false;
+    } finally {
+      this.removeWorktree(dir);
+    }
+  }
+  syncBackupGroups(state, group) {
+    // Older syncs could replay an untracked, already-merged feature as empty
+    // commits. Recover its original patches only from our retained sync backups,
+    // proving the old commits replay to each current commit's exact tree.
+    const identity = (sha) =>
+      `${this.git("show", "-s", "--format=%an%x00%ae%x00%aI%x00%B", sha)}\0${this.note(sha)}`;
+    const identities = group.commits.map(identity);
+    const backups = this.git(
+      "for-each-ref",
+      "--sort=-creatordate",
+      "--format=%(objectname)",
+      "refs/prm/backups",
+    )
+      .split("\n")
+      .filter(Boolean);
+    const groups = [];
+    for (const tip of backups) {
+      const base = this.git("merge-base", this.baseRef(state), tip);
+      const commits = this.git("rev-list", "--reverse", `${base}..${tip}`)
+        .split("\n")
+        .filter((sha) => sha && parseNote(this.note(sha)).name === group.name);
+      if (
+        commits.length !== group.commits.length ||
+        commits.some((sha, i) => identity(sha) !== identities[i])
+      )
+        continue;
+      if (
+        commits.every((sha, i) =>
+          this.projectionMatches(
+            [sha],
+            `${group.commits[i]}^`,
+            this.git("rev-parse", `${group.commits[i]}^{tree}`),
+          ),
+        )
+      )
+        groups.push(commits);
+    }
+    return groups;
+  }
+  verifyMergedGroup(state, group, pr) {
+    if (
+      !pr.mergeCommit?.oid ||
+      this.optionalGit(
+        "merge-base",
+        "--is-ancestor",
+        pr.mergeCommit.oid,
+        this.baseRef(state),
+      ) === null
+    )
+      throw new Error(
+        `PR #${pr.number}'s merge is not in the fetched base yet. Run sync again after the base updates.`,
+      );
+    const incoming = `refs/prm/adopt/${randomUUID()}`;
+    try {
+      // Pull refs survive head-branch deletion. Never recreate or push that branch.
+      this.git(
+        "fetch",
+        "--no-tags",
+        state.remote,
+        `refs/pull/${pr.number}/head:${incoming}`,
+      );
+      if (this.git("rev-parse", incoming) !== pr.headRefOid)
+        throw new Error(
+          `PR #${pr.number}'s head changed during verification. Retry.`,
+        );
+      const parent = this.git("rev-parse", `${pr.mergeCommit.oid}^1`);
+      const base = this.git("merge-base", parent, incoming);
+      const published = this.git(
+        "rev-list",
+        "--reverse",
+        `${base}..${incoming}`,
+      )
+        .split("\n")
+        .filter(Boolean);
+      const candidates = [group.commits];
+      if (
+        group.commits.some(
+          (sha) =>
+            !this.git("diff-tree", "--no-commit-id", "--name-only", "-r", sha),
+        )
+      )
+        candidates.push(...this.syncBackupGroups(state, group));
+      const signature = this.patchSignature(published);
+      const matches =
+        !this.git("rev-list", "--merges", `${base}..${incoming}`) &&
+        candidates.some(
+          (commits) =>
+            commits.length === published.length &&
+            this.patchSignature(commits) === signature &&
+            this.projectionMatches(
+              commits,
+              base,
+              this.git("rev-parse", `${incoming}^{tree}`),
+            ) &&
+            this.projectionMatches(
+              commits,
+              parent,
+              this.git("rev-parse", `${pr.mergeCommit.oid}^{tree}`),
+            ),
+        );
+      if (!matches)
+        throw new Error(
+          `Merged PR #${pr.number} does not exactly match ${group.name}. Local work was preserved; inspect the feature before syncing.`,
+        );
+      const latest = this.prStatus(state, { pr: pr.number });
+      if (
+        latest.state !== "MERGED" ||
+        latest.headRefOid !== pr.headRefOid ||
+        latest.baseRefName !== state.base ||
+        latest.mergeCommit?.oid !== pr.mergeCommit.oid
+      )
+        throw new Error(`PR #${pr.number} changed during verification. Retry.`);
+    } finally {
+      this.optionalGit("update-ref", "-d", incoming);
+    }
+  }
+  sync({
+    dryRun = false,
+    continue: resume = false,
+    abort = false,
+    expectedRevision,
+    featureNames,
+    onPrStatus,
+  } = {}) {
     return this.locked(
       () => {
+        assertPushRunOwner(this);
         const state = this.state();
         this.onBranch(state);
         this.clean();
+        if (expectedRevision && expectedRevision !== this.graph().revision)
+          throw new Error("The repository changed. Refresh before syncing.");
         if (resume || abort) {
           if (!fs.existsSync(this.journalPath))
             throw new Error("No paused sync.");
@@ -1119,8 +1528,9 @@ export class Manager {
         this.fetch(state);
         const merged = {};
         for (const [name, feature] of Object.entries(state.features))
-          if (feature.pr) {
+          if (feature.pr && (!featureNames || featureNames.includes(name))) {
             const pr = this.prStatus(state, feature);
+            onPrStatus?.(name, pr);
             if (pr.baseRefName !== state.base)
               throw new Error(`PR #${pr.number} targets a different base.`);
             if (pr.state !== "MERGED") continue;
@@ -1155,6 +1565,25 @@ export class Manager {
               mergedAt: pr.mergedAt,
             };
           }
+        for (const group of graph.groups) {
+          if (
+            state.features[group.name]?.pr ||
+            (featureNames && !featureNames.includes(group.name))
+          )
+            continue;
+          const pr = this.mergedPrForGroup(state, group);
+          if (!pr) continue;
+          this.verifyMergedGroup(state, group, pr);
+          merged[group.name] = {
+            pr: pr.number,
+            url: pr.url,
+            mergedAt: pr.mergedAt,
+          };
+        }
+        if (this.graph().revision !== graph.revision)
+          throw new Error(
+            "The repository changed during sync verification. Refresh and retry.",
+          );
         const removed = graph.commits.filter(
           (c) => c.name && Object.hasOwn(merged, c.name),
         );

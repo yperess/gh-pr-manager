@@ -3,15 +3,23 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
+import { run } from "./core.js";
+import { pushRequest, operationRequest } from "./requests.js";
+import { requestBridge } from "./operations.js";
 
 const ui = fileURLToPath(new URL("../ui/", import.meta.url));
 const assets = {
   "/": ["index.html", "text/html"],
   "/app.js": ["app.js", "text/javascript"],
+  "/diff.js": ["diff.js", "text/javascript"],
   "/style.css": ["style.css", "text/css"],
 };
 
-export function createServer(manager, token = randomBytes(32).toString("hex")) {
+export function createServer(
+  manager,
+  token = randomBytes(32).toString("hex"),
+  { operation } = {},
+) {
   const server = http.createServer(async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -42,18 +50,34 @@ export function createServer(manager, token = randomBytes(32).toString("hex")) {
           return reply(403, { error: "Invalid session token." });
         if (req.method === "GET" && url.pathname === "/api/graph")
           return reply(200, manager.graph());
+        if (req.method === "GET" && url.pathname === "/api/pr-status") {
+          const result = operation
+            ? await operation("pr-status", undefined)
+            : await requestBridge(
+                manager.root,
+                fileURLToPath(new URL("./bridge.js", import.meta.url)),
+                { route: "pr-status" },
+              );
+          return reply(200, result);
+        }
         if (req.method === "GET" && url.pathname === "/api/diff") {
           const sha = url.searchParams.get("sha");
           if (!manager.graph().commits.some((c) => c.sha === sha))
             throw new Error("Unknown commit.");
           return reply(200, {
-            diff: manager.git(
-              "show",
-              "--format=fuller",
-              "--no-ext-diff",
-              "--no-textconv",
-              sha,
-              "--",
+            diff: run(
+              "git",
+              [
+                "show",
+                "--format=fuller",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                sha,
+                "--",
+              ],
+              manager.root,
+              { trimEnd: false },
             ),
           });
         }
@@ -66,10 +90,50 @@ export function createServer(manager, token = randomBytes(32).toString("hex")) {
             return reply(413, { error: "Request too large." });
         }
         const data = JSON.parse(body);
+        if (url.pathname === "/api/push-stop")
+          return reply(200, operationRequest(manager, "push-stop", data));
         if (data.revision !== manager.graph().revision)
           return reply(409, {
             error: "The repository changed. Refresh before editing.",
           });
+        if (
+          ["/api/sync", "/api/adopt"].includes(url.pathname) ||
+          (url.pathname === "/api/push" && data.dryRun === false)
+        ) {
+          const route = url.pathname.slice(5);
+          res.writeHead(200, {
+            "Content-Type": "application/x-ndjson",
+            "X-Accel-Buffering": "no",
+          });
+          res.flushHeaders();
+          const emit = (event) => {
+            if (!res.destroyed) res.write(`${JSON.stringify(event)}\n`);
+          };
+          const controller = new AbortController();
+          const disconnect = () => {
+            if (!res.writableEnded) controller.abort();
+          };
+          res.on("close", disconnect);
+          try {
+            const result = operation
+              ? await operation(route, data, emit)
+              : await requestBridge(
+                  manager.root,
+                  fileURLToPath(new URL("./bridge.js", import.meta.url)),
+                  { route, data },
+                  emit,
+                  { signal: controller.signal },
+                );
+            emit({ type: "result", result });
+          } catch (error) {
+            emit({ type: "error", error: error.message });
+          }
+          res.off("close", disconnect);
+          res.end();
+          return;
+        }
+        if (url.pathname === "/api/push")
+          return reply(200, pushRequest(manager, data));
         if (url.pathname === "/api/metadata")
           return reply(
             200,

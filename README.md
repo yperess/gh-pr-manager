@@ -172,21 +172,43 @@ To adopt existing branches, first bring their commits onto your linear managed
 working branch (for example, cherry-pick each independent branch's commits onto
 a fresh integration branch from `origin/develop`). Tag those commits with their
 feature names, then set each feature's existing full branch name as above.
-Inspect `push --dry-run`, then run `push` for the features you want to adopt.
+To record an existing open PR without publishing anything, use:
 
-An existing remote branch is adopted only with an explicit `prm-branch-name`
-and a ready feature. Its history must be linear, contain the current remote
-base, and match the feature projection's tree, commit count, and ordered patch
-IDs. Commit IDs may differ because of cherry-picking. The initial adoption keeps
+```sh
+gh prm adopt FEATURE PR_NUMBER
+# Example:
+gh prm adopt optional-interface-fixture 1477
+```
+
+This verifies the PR's repository, base and head branch, and the exact feature
+projection at the existing branch's own base. It fetches for verification and
+records the PR number, URL, remote head, and source commits in local tracking
+state. It does not push, rewrite the working branch, edit the PR, or restart CI.
+Dirty work is preserved. Unlike implicit adoption during push, this explicit
+command can adopt a matching default branch name without a branch override.
+The feature must have no unmet prerequisites. PR/head or repository changes
+while verification is running stop adoption without recording the association.
+
+Alternatively, inspect `push --dry-run`, then run `push` for the features you want
+to publish; its matching-branch adoption checks still apply.
+
+During push, an existing remote branch is adopted only with an explicit `prm-branch-name`
+and a ready feature. Its history must be linear and match the feature
+projection's tree, commit count, and ordered patch IDs when replayed onto the
+remote branch's own merge-base with trunk. Older-base PRs can be adopted. Commit IDs may differ because of cherry-picking. The initial adoption keeps
 the remote commit IDs and reuses its open PR against the configured base; if no
 open PR exists, one is created. Existing PR titles and descriptions are retained.
-Unrelated work, a stale base, or a PR against a different base stops publication.
+Unrelated work or a PR against a different base stops publication.
 Reconcile those branches yourself first; previews cannot adopt existing branches.
 
 Branch checks run for the whole selected batch before any push. Exact
 force-with-lease checks also protect against remote changes during publication.
-Neither naming nor adoption changes local feature branch refs. Later review
-updates and sync use the same workflow as newly created PRs.
+Neither naming nor adoption changes local feature branch refs. Unchanged ready
+features retain their published commit IDs, including after sync rewrites the
+source commits with equivalent patches and messages. No remote push or pre-push
+hook runs for those branches, so existing CI runs are preserved. Changed feature
+commits use the normal isolated projection and leased push. Later review updates
+and sync use the same workflow as newly created PRs.
 
 ## Publish ready work, or push a named preview
 
@@ -197,6 +219,19 @@ and description **as of that commit**. Each field inherits the last explicit
 value on an earlier commit in the same feature. Later commits and commits from
 other features do not affect this historical view. The feature inspector shows
 the latest effective values. Both views identify the source commit for each field.
+
+Select a feature to edit its current title and description directly in the right
+inspector. **Save feature metadata** writes changed fields to the latest commit
+in that feature, even when the integration branch's HEAD belongs to a different
+feature. Earlier overrides remain intact. The inspector shows the destination
+commit and source of each current value.
+
+Selecting a commit switches the same inspector to that commit's inherited values
+and override controls. Click **Edit feature metadata** to return to its feature.
+The patch stays visible with the graph and history in the left pane. Drag the
+vertical divider to resize the inspector; when focused, Left/Right arrows resize
+it, and Home/End select its minimum/maximum width. The width is remembered across
+reloads. On narrow screens the inspector appears below the history.
 
 Enable **Override title/description at this commit** to set a value. Uncheck it
 to remove that commit's override and inherit again. An enabled, empty description
@@ -255,6 +290,68 @@ and description. The tool doesn't overwrite review descriptions on updates.
 Closed PRs require manual reopening. It won't turn a published PR into a
 full-history preview by adding unmet dependencies.
 
+## Continuous pushes
+
+```sh
+# Snapshot every current feature, including those waiting for prerequisites:
+gh prm push --wait
+
+# Snapshot only these features; dependencies are not added automatically:
+gh prm push feature2 feature3 --wait
+
+# Inspect the fixed selection without starting a run:
+gh prm push --wait --dry-run
+
+# Inspect run membership and each feature's state:
+gh prm status
+gh prm status --json
+
+# Stop from another terminal, or press Ctrl+C in the blocking command:
+gh prm push --stop
+```
+
+`--wait` runs in the foreground and checks for merges every 30 seconds. It
+publishes ready selected features, syncs when their prerequisites merge, and
+publishes newly unblocked features. For A/B → C → D/E, it publishes A and B,
+waits for both to merge, publishes C, waits for C to merge, then publishes D and
+E. It finishes once the remaining selected PRs have been published; the last
+PRs need not merge. It never merges PRs itself. Normal pushes without `--wait`
+retain their one-shot behavior, including preview branches for named blocked
+features. Continuous pushes wait to create isolated PRs instead of previews.
+
+The feature list, commits, notes, branch names, and dependencies are fixed when
+the run starts. New features are ignored. If a selected feature receives new
+commits, loses commits, or has its notes changed, it is dropped from this run,
+even if its previous version already has a PR. Dependents become unreachable;
+independent selected features continue. A PR closed without merging is also
+dropped, so its dependents do not wait forever. Only the run's own sync can remap the
+snapshot's commit IDs without dropping a feature. Start a new push to include
+new work. A dependency outside the selection must already be recorded as merged,
+or have a tracked PR whose published commits match its current source. Such PRs
+are watched for merges without pushing them again; their feature snapshots are
+also frozen, so new unpublished work blocks their dependents. Unpublished
+prerequisites are not implicitly added to the publication selection.
+The run stops when nothing remains
+pending, or all remaining pending features are unreachable.
+
+A dirty working tree pauses polling mutations until it is clean; the tool never
+stashes edits. Git conflicts, authentication failures, and publication errors
+stop the run for inspection. Already published PRs remain published. The active
+run owns push/sync operations for this repository across worktrees, but releases
+Git locks while waiting, so commits and notes can still be edited. Stop it before
+running a separate push or sync. The latest run is recorded locally in the Git
+common directory's `prm/push-run.json`; `status --json` and the graph expose its
+pending, published, merged, dropped, and unreachable features. An interrupted
+process is shown as interrupted; a new push starts a fresh selection rather
+than silently resuming publication.
+
+In the browser and VS Code, select either push mode and check **Keep pushing
+until done**, then preview and start the run. The preview includes waiting
+features. The graph marks pending features, and the dialog and banner show live
+run states and a **Stop push run** button. Stop requests work while Git is busy
+and take effect between Git operations; completed pushes are preserved. Closing
+the browser's streaming connection or the VS Code panel cancels its run.
+
 ## Review updates and sync
 
 ```sh
@@ -279,9 +376,23 @@ gh prm push
 
 `sync` fetches the base and reads the state of tracked PRs. It uses actual PR
 merge status and the last published projection, rather than commit ancestry,
-so **squash merges work**. Only published commits in merged groups are removed.
-If a merged group has unpublished local commits, sync stops: reassign those
-commits to a new follow-up feature before continuing.
+so **squash merges work**. Only published commits in tracked merged groups are
+removed. If a merged group has unpublished local commits, sync stops: reassign
+those commits to a new follow-up feature before continuing.
+
+For untracked features with an explicit `prm-branch-name`, sync also looks for a
+unique merged PR from that branch in the same repository against the configured
+base. Before removing the feature, it verifies the PR's merge is in the fetched
+base, its ordered commits match the feature, and replay produces the exact PR
+and merge trees. This works after GitHub deletes the head branch; no push or
+prior adoption is needed. Ambiguous PRs or unmatched local changes stop sync
+without rewriting your branch. `sync --dry-run` previews this reconciliation.
+
+If an earlier sync replayed an untracked merged feature as empty commits, sync
+can recover the original patches from its retained backups. It requires matching
+commit metadata and notes, verifies each original patch reproduces the current
+commit's tree, then checks the complete feature against the merged PR. Empty
+commits or matching branch names alone are insufficient to remove a feature.
 
 Sync builds the replacement history in a separate worktree. Your working branch
 stays untouched until replay finishes. A successful sync preserves the old tip
@@ -315,11 +426,82 @@ gh prm view --dot > graph.dot    # Graphviz DOT, including commits and groups
 gh prm view --json               # full machine-readable graph
 ```
 
+Commit patches use green additions, red deletions, and old/new line numbers.
+Switch between **Unified** (top/down) and **Side by side** above the patch; the
+choice is remembered in the browser session or VS Code webview state. Split
+panes share vertical alignment and synchronize horizontal scrolling. Files and
+hunks can be collapsed individually, or with **Collapse all** / **Expand all**;
+layout changes preserve the current patch's collapse state. Binary and
+metadata-only changes retain their Git metadata, and unsupported patch formats
+are shown as plain text. Source code is displayed as text, not interpreted as
+HTML. The browser and VS Code use the same viewer.
+
 The editor shows the dependency DAG, grouped commit history, and commit patches.
+Click a feature in the graph to show only its commits in the history. Click empty
+canvas (including a dependency arrow), or press Escape while the graph is focused,
+to show all commits again. Filtering also works when activating a feature with
+Enter or Space.
 Select a feature to add/remove prerequisites; select commits to assign a group.
-Editing changes notes only. Refresh reads external Git changes. The viewer
-doesn't publish or rewrite history. It binds to loopback, requires a random
-session token for API calls, rejects foreign origins, and uses no external assets.
+Assignments, dependencies, and metadata edits change notes only. Refresh reads
+external Git changes. The viewer binds to loopback, requires a random session
+token for API calls, rejects foreign origins, and uses no external assets.
+
+On opening the UI and each **Refresh**, a background, read-only GitHub request
+finds existing open PRs by their resolved branch names, even before the first
+push/adoption. For explicit branch overrides without an open PR, it also finds
+merged PRs and shows **Merged · sync needed**. Matching fork branches are excluded.
+Select a feature to open its
+PR in a new browser tab and see current-head CI, review decision, and the number
+of unresolved review threads. Failing CI, changes requested, or unresolved threads
+highlight the feature as needing attention. Resolved threads do not count;
+ordinary PR conversation comments are not classified as unresolved review work.
+The selected feature's sidebar shows **PR #… found · Not tracked** with an
+**Adopt PR** action beside its PR link. Adoption performs the same checks as
+`gh prm adopt` and then shows **Tracking PR #…**. Titles/descriptions being edited
+remain intact; any earlier push preview is invalidated. Verification errors stay
+in the sidebar. The action is disabled during another operation, paused sync, or
+while prerequisites remain unmerged. It is not a top-level toolbar action.
+
+Pending CI is shown separately. Missing checks or API/authentication failures show
+unknown/unavailable rather than passing. Status is a timestamped snapshot; click
+**Refresh** for updates. Discovery does not adopt or push branches, mark dependencies
+merged, or change GitHub PR metadata. Local history remains usable when GitHub is
+unavailable. The browser app and VS Code webview share these behaviors.
+
+The top-right toolbar has **Push**, **Sync**, and **Refresh** actions. Push and
+Sync open their own dialogs, leaving the inspector focused on feature/commit edits.
+
+To publish work:
+
+1. Click **Push**. **What's ready** is selected by default and includes all ready
+   features. Switch the pill toggle to **Let me choose** to select specific
+   features. Selecting a waiting feature includes a full-history preview branch
+   without a PR, just like `gh prm push FEATURE`.
+2. Click **Preview push** to inspect the repository, base, branch names, and PR
+   actions. This runs the local dry run; remote adoption and isolation checks
+   happen during the actual push.
+3. Click **Push N branches**. The dialog shows live command progress followed by
+   PR links and preview-branch results, and refreshes the graph.
+
+Click **Sync** to immediately start synchronization in its own dialog. Its live
+command log shows fetching, PR checks, replaying remaining commits onto the base,
+backup creation, and updating the managed branch. Sync uses the CLI's isolation,
+notes preservation, backup, and recovery journal. Conflicts stop with the same
+worktree path and `gh prm sync --continue` / `--abort` instructions as the CLI.
+
+Operations run in background processes so commands appear while they execute.
+The dialog cannot be closed and another operation cannot start until the running
+operation finishes. Long Git hooks and network operations are allowed to finish
+without the normal read-request timeout. Refresh reloads local state and PR status.
+
+Push and sync use the same hooks, isolation, leases, adoption rules, and
+clean-tree checks as the CLI. They never stash changes. A changed source, notes,
+configuration, or publication state requires a fresh push preview. Refreshing or
+changing the push selection also clears the preview.
+
+If an operation fails, the dialog retains the error and command log and refreshes
+the graph. A push batch can partially publish before a remote/API failure;
+inspect the updated state and preview again before retrying.
 
 ## VS Code
 
@@ -335,7 +517,7 @@ must be available to the VS Code extension host.
 
 Open a trusted local workspace, initialize it using the CLI, then run
 **PR Manager: Open Dependency Graph** from the Command Palette. The webview has
-the same assignment, dependency editing, and patch inspection controls as the
+the same assignment, dependency editing, push/sync, and patch inspection controls as the
 browser app. Git commands run in a separate process. Multi-root workspaces
 prompt for the repository to view.
 
@@ -434,8 +616,9 @@ this example or assume changing a user setting will override it.
 
 For the review, provide the MIT license, source revision, test results, and VSIX
 artifact. The VS Code view reads local Git history, edits Git notes, and invokes
-local Git/gh subprocesses in trusted workspaces. Publishing PRs and rewriting
-history are separate CLI actions. Include these behaviors in the review;
+local Git/gh subprocesses in trusted workspaces. Push can publish branches and
+create or update PRs after a preview. Sync can rewrite the managed working branch
+using backups and a recovery journal. Include these behaviors in the review;
 Marketplace availability does not reduce the extension's runtime permissions.
 
 Once IT permits the installation, users can install the published extension
