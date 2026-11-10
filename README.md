@@ -334,7 +334,7 @@ prerequisites are not implicitly added to the publication selection.
 The run stops when nothing remains
 pending, or all remaining pending features are unreachable.
 
-A dirty working tree pauses polling mutations until it is clean; the tool never
+A dirty managed checkout pauses polling mutations until it is clean; the tool never
 stashes edits. Git conflicts, authentication failures, and publication errors
 stop the run for inspection. Already published PRs remain published. The active
 run owns push/sync operations for this repository across worktrees, but releases
@@ -351,6 +351,62 @@ features. The graph marks pending features, and the dialog and banner show live
 run states and a **Stop push run** button. Stop requests work while Git is busy
 and take effect between Git operations; completed pushes are preserved. Closing
 the browser's streaming connection or the VS Code panel cancels its run.
+
+### Work on another effort while a push waits
+
+In the browser or VS Code UI, **Keep pushing until done** automatically moves the
+managed branch into a separate worktree under the system temporary directory
+(`/tmp` or its platform equivalent). Your original checkout must be clean. Its
+files stay unchanged, but it becomes detached at its current commit so the
+managed branch can be checked out in the temporary worktree. You can then switch
+your original workspace to another branch and edit, stage, and commit normally.
+Those changes do not pause the isolated push.
+
+The UI stays connected to the managed worktree, even after you switch branches
+in the original workspace. It shows the temporary path; push, sync, PR status,
+and note editing there continue to refer to the managed effort. CLI commands
+still operate in the directory where you run them. Keep the UI and its server
+running: closing the browser connection or VS Code panel cancels the continuous
+run. This is an isolated checkout, not a detached background service.
+
+The temporary worktree is retained after completion, cancellation, or failure so
+you can inspect the result, resume conflict recovery, or start another run from
+the UI. The managed branch and PR metadata stay in the same repository. To inspect
+or recover a conflict, use the displayed checkout path and the recovery commands
+printed by sync. Do not delete temporary directories while a run is active.
+
+For the equivalent CLI workflow, create a temporary worktree yourself before
+starting the blocking command. For example, in `lohi-lib`:
+
+```sh
+cd ~/workspace/lohi-lib
+
+# Keep the current files but release the managed branch.
+git switch --detach
+prm_dir=$(mktemp -d /tmp/lohi-prm.XXXXXX)
+git worktree add "$prm_dir" yperess/prm-ontology-migrations
+
+# Start the new effort in your original workspace.
+git switch -c yperess/new-effort origin/develop
+
+# Keep this terminal running. You can also name a subset of features here.
+(cd "$prm_dir" && gh prm push --wait)
+```
+
+After the run stops and you have finished reviewing its checkout, remove it using
+its displayed path. For the CLI example, in the same shell:
+
+```sh
+cd ~/workspace/lohi-lib
+git worktree remove "$prm_dir"
+```
+
+For a UI-created worktree, substitute its displayed path for `$prm_dir`. Removal
+refuses to discard uncommitted changes; resolve or save those first. It preserves
+the managed branch, notes, and PR tracking. A later UI session can use the managed
+branch again after you check it out. If you use a new terminal, use the actual
+path rather than relying on the previous shell's variable. System cleanup or a
+reboot may remove temporary directories; this is not durable daemon storage.
 
 ## Review updates and sync
 

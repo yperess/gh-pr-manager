@@ -1,6 +1,7 @@
 // A short-lived process keeps Git and gh work out of the VS Code extension host.
 import { readPrStatuses } from "./pr-status.js";
 import { Manager, run } from "./core.js";
+import { resolveUiManager } from "./ui-worktree.js";
 import { operationRequest } from "./requests.js";
 
 let stream = false;
@@ -17,11 +18,13 @@ try {
     requestedStream === true &&
     (["sync", "adopt"].includes(route) ||
       (route === "push" && data?.dryRun === false));
-  const manager = new Manager(process.cwd(), undefined, {
-    onProgress: (event) => {
-      if (stream) emit({ type: "progress", ...event });
-    },
-  });
+  const manager = resolveUiManager(
+    new Manager(process.cwd(), undefined, {
+      onProgress: (event) => {
+        if (stream) emit({ type: "progress", ...event });
+      },
+    }),
+  );
   const controller = new AbortController();
   if (route === "push" && data?.wait) {
     process.on("SIGTERM", () => controller.abort());

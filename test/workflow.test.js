@@ -18,6 +18,7 @@ import {
   readPushRun,
   stopPushRun,
 } from "../src/push-run.js";
+import { prepareUiWorktree, resolveUiManager } from "../src/ui-worktree.js";
 import { createServer } from "../src/server.js";
 import { pushRequest, operationRequest } from "../src/requests.js";
 import { requestBridge } from "../src/operations.js";
@@ -2165,4 +2166,190 @@ test("diff transports load the shared viewer and preserve whitespace without Git
   assert.equal(browser.diff, bridge.diff);
   assert.ok(browser.diff.endsWith("+A  \n"));
   assert.equal(browser.diff.includes("\u001b["), false);
+});
+
+test("isolated UI push syncs and publishes dependencies while the original workspace changes branches and stays dirty", async (t) => {
+  const f = fiveFeatures(t),
+    m = f.manager;
+  const originalHead = m.head();
+  let polls = 0,
+    otherHead,
+    indexTree,
+    workspace;
+  t.after(() => {
+    if (workspace) fs.rmSync(workspace, { recursive: true, force: true });
+  });
+  const result = await continuousPush(
+    m,
+    {},
+    {
+      prepare: prepareUiWorktree,
+      interval: 1,
+      sleep: async () => {
+        const worker = resolveUiManager(m);
+        workspace = worker.root;
+        assert.ok(
+          workspace.startsWith(
+            path.join(fs.realpathSync(os.tmpdir()), "gh-prm-"),
+          ),
+        );
+        assert.equal(worker.branch(), "work");
+        assert.equal(fs.existsSync(path.join(m.dir, "lock")), false);
+        if (++polls === 1) {
+          assert.equal(f.git("rev-parse", "HEAD"), originalHead);
+          assert.equal(m.optionalGit("symbolic-ref", "--quiet", "HEAD"), null);
+          f.git("switch", "-c", "unrelated", "origin/main");
+          otherHead = f.commit("unrelated");
+          fs.writeFileSync(path.join(f.root, "base.txt"), "staged change\n");
+          f.git("add", "base.txt");
+          indexTree = f.git("write-tree");
+          fs.writeFileSync(path.join(f.root, "base.txt"), "unstaged change\n");
+          fs.writeFileSync(
+            path.join(f.root, "untracked.txt"),
+            "private work\n",
+          );
+          f.merge("A");
+          m.fetch(m.state());
+          f.merge("B");
+        } else {
+          assert.equal(polls, 2);
+          assert.deepEqual([...f.prs.keys()], ["prm/A", "prm/B", "prm/C"]);
+          f.merge("C");
+        }
+      },
+    },
+  );
+  assert.equal(result.run.status, "completed");
+  assert.equal(result.run.worktree, workspace);
+  assert.equal(f.git("branch", "--show-current"), "unrelated");
+  assert.equal(f.git("rev-parse", "HEAD"), otherHead);
+  assert.equal(f.git("write-tree"), indexTree);
+  assert.equal(
+    fs.readFileSync(path.join(f.root, "base.txt"), "utf8"),
+    "unstaged change\n",
+  );
+  assert.equal(
+    fs.readFileSync(path.join(f.root, "untracked.txt"), "utf8"),
+    "private work\n",
+  );
+  const worker = resolveUiManager(m);
+  assert.deepEqual(
+    worker.graph().groups.map((g) => g.name),
+    ["D", "E"],
+  );
+  assert.equal(worker.graph().uiWorktree.originalRoot, fs.realpathSync(f.root));
+  assert.equal(prepareUiWorktree(worker), worker);
+  const replay = worker.createWorktree(worker.baseRef(worker.state()));
+  assert.equal(path.dirname(replay), path.dirname(workspace));
+  worker.removeWorktree(replay);
+  // Fresh browser/extension requests still reach the worker after completion.
+  const bridge = new URL("../src/bridge.js", import.meta.url).pathname;
+  const graph = await requestBridge(f.root, bridge, { route: "graph" });
+  assert.equal(graph.uiWorktree.path, workspace);
+  assert.deepEqual(
+    graph.groups.map((g) => g.name),
+    ["D", "E"],
+  );
+  const { server, token } = createServer(m);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const response = await fetch(
+    `http://127.0.0.1:${server.address().port}/api/graph`,
+    {
+      headers: { "X-PRM-Token": token },
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).uiWorktree.path, workspace);
+});
+
+test("UI continuous push prepares its temporary checkout automatically and reuses it", async (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  configure(f, "BRANCH_PREFIX=alice\n");
+  m.tag("A", [f.commit("A")]);
+  const head = m.head(),
+    revision = m.graph().revision;
+  const preview = pushRequest(m, {
+    names: [],
+    revision,
+    wait: true,
+    dryRun: true,
+  });
+  assert.equal(preview.continuous, true);
+  assert.equal(m.branch(), "work");
+  assert.equal(fs.existsSync(path.join(m.dir, "ui-worktree.json")), false);
+  const result = await pushRequest(m, {
+    names: [],
+    revision,
+    wait: true,
+    dryRun: false,
+  });
+  const worker = resolveUiManager(m);
+  t.after(() => fs.rmSync(worker.root, { recursive: true, force: true }));
+  assert.equal(result.run.status, "completed");
+  assert.equal(result.run.worktree, worker.root);
+  assert.equal(m.head(), head);
+  assert.equal(m.optionalGit("symbolic-ref", "--quiet", "HEAD"), null);
+  assert.equal(f.git("status", "--porcelain"), "");
+  assert.equal(worker.branch(), "work");
+  assert.equal(worker.graph().groups[0].branch, "alice/A");
+  const again = await pushRequest(worker, {
+    names: [],
+    revision: worker.graph().revision,
+    wait: true,
+    dryRun: false,
+  });
+  assert.equal(again.run.worktree, worker.root);
+  assert.equal(f.prs.size, 1);
+});
+
+test("UI isolation rejects dirty and stale starts without detaching or creating a checkout", async (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("A", [f.commit("A")]);
+  const revision = m.graph().revision;
+  fs.writeFileSync(path.join(f.root, "dirty.txt"), "unfinished\n");
+  await assert.rejects(
+    () => pushRequest(m, { names: [], revision, wait: true, dryRun: false }),
+    /must be clean/,
+  );
+  fs.unlinkSync(path.join(f.root, "dirty.txt"));
+  m.metadata(m.head(), { title: "changed" }, revision);
+  await assert.rejects(
+    () => pushRequest(m, { names: [], revision, wait: true, dryRun: false }),
+    /repository changed/i,
+  );
+  assert.equal(m.branch(), "work");
+  assert.equal(fs.existsSync(path.join(m.dir, "ui-worktree.json")), false);
+  assert.equal(fs.existsSync(path.join(m.dir, "push-run.json")), false);
+  assert.equal(
+    f.git("worktree", "list", "--porcelain").match(/^worktree /gm).length,
+    1,
+  );
+});
+
+test("failed UI checkout handoff restores the original branch without forcing away edits", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("A", [f.commit("A")]);
+  const git = m.git.bind(m);
+  m.git = (...args) => {
+    if (args[0] === "switch" && args[1] === "--detach") {
+      git(...args);
+      throw new Error("simulated checkout failure");
+    }
+    return git(...args);
+  };
+  assert.throws(
+    () => m.locked(() => prepareUiWorktree(m)),
+    /simulated checkout failure/,
+  );
+  assert.equal(m.branch(), "work");
+  assert.equal(f.git("status", "--porcelain"), "");
+  assert.equal(fs.existsSync(path.join(m.dir, "ui-worktree.json")), false);
+  assert.equal(
+    f.git("worktree", "list", "--porcelain").match(/^worktree /gm).length,
+    1,
+  );
 });

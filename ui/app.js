@@ -530,6 +530,14 @@ function renderCommits() {
   const commits = historyFeature
     ? graph.commits.filter((c) => c.name === historyFeature)
     : graph.commits;
+  if (selectedCommit && !commits.some((c) => c.sha === selectedCommit)) {
+    selectedCommit = null;
+    inspectorMode = "feature";
+    $("metadata-panel").hidden = true;
+    $("diff-title").textContent = "Commit details";
+    ++diffRequestVersion;
+    diffMessage("No commit selected.");
+  }
   $("history-context").textContent = historyFeature
     ? `${historyFeature} · ${commits.length} of ${graph.commits.length} commits · Click empty canvas or press Escape to show all`
     : "Oldest first · colors connect commits to their PR group";
@@ -806,14 +814,6 @@ async function refresh() {
     renderGraph();
     renderCommits();
     updateSelected();
-    if (selectedCommit && !active.has(selectedCommit)) {
-      selectedCommit = null;
-      inspectorMode = "feature";
-      $("metadata-panel").hidden = true;
-      $("diff-title").textContent = "Commit details";
-      ++diffRequestVersion;
-      diffMessage("No commit selected.");
-    }
     if (inspectorMode === "commit" && selectedCommit)
       selectCommit(selectedCommit);
     else if (selectedFeature) selectFeature(selectedFeature);
@@ -849,6 +849,11 @@ function renderPushRun(run, nextGraph) {
     renderGraph();
     renderCommits();
   }
+  const workspace = graph.uiWorktree;
+  $("workspace-info").hidden = !workspace;
+  $("workspace-info").textContent = workspace
+    ? `Managed checkout: ${workspace.path}. Your original workspace is free for other branches. This checkout is retained after the run finishes.`
+    : "";
   if (!run) {
     $("push-run-banner").hidden = true;
     return;
@@ -859,7 +864,7 @@ function renderPushRun(run, nextGraph) {
   for (const entry of run.features)
     counts.set(entry.status, (counts.get(entry.status) || 0) + 1);
   $("push-run-summary").textContent =
-    `Push run ${run.status}: ${[...counts].map(([state, count]) => `${count} ${state}`).join(" · ")}${run.message || run.error ? ` · ${run.message || run.error}` : ""}`;
+    `Push run ${run.status}${run.worktree ? ` in ${run.worktree}` : ""}: ${[...counts].map(([state, count]) => `${count} ${state}`).join(" · ")}${run.message || run.error ? ` · ${run.message || run.error}` : ""}`;
   $("push-run-features").hidden = false;
   $("push-run-features").replaceChildren(
     ...[

@@ -607,8 +607,17 @@ footer {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 0 24px 12px;
+  gap: 6px;
+  padding: 0 24px 6px;
+}
+.diff-toolbar .pill-toggle {
+  margin: 0;
+  padding: 2px;
+}
+.diff-toolbar button {
+  padding: 3px 8px;
+  font-size: 12px;
+  line-height: 18px;
 }
 .diff-collapse-actions {
   display: flex;
@@ -639,7 +648,12 @@ footer {
   overflow: clip;
 }
 .diff-file > summary {
-  padding: 10px 12px;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  min-height: 36px;
+  padding: 8px 12px;
+  line-height: 20px;
   background: #202c3d;
   font-weight: 600;
   overflow-wrap: anywhere;
@@ -656,8 +670,14 @@ footer {
   margin-left: 16px;
   font-size: 11px;
   font-weight: 400;
-  color: #a4d5bd;
+  color: var(--muted);
   white-space: nowrap;
+}
+.diff-stat-added {
+  color: #a4d5bd;
+}
+.diff-stat-deleted {
+  color: #ffb5b5;
 }
 .diff-viewer .diff-file-meta {
   color: var(--muted);
@@ -665,7 +685,10 @@ footer {
   font-size: 11px;
 }
 .diff-hunk > summary {
-  padding: 7px 12px;
+  position: sticky;
+  top: var(--diff-file-header-height, 36px);
+  z-index: 2;
+  padding: 6px 12px;
   color: #b8cefa;
   background: #22334c;
   font:
@@ -763,7 +786,7 @@ footer {
 }
 @media (max-width: 850px) {
   .diff-toolbar {
-    padding: 0 12px 10px;
+    padding: 0 12px 6px;
   }
   .diff-viewer {
     padding: 0 12px 16px;

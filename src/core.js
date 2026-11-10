@@ -193,6 +193,7 @@ export function validateGraph(groups, merged = {}) {
 export class Manager {
   constructor(cwd = process.cwd(), gh, { onProgress } = {}) {
     this.onProgress = onProgress;
+    this.ghOverride = gh;
     this.root = run("git", ["rev-parse", "--show-toplevel"], cwd);
     this.common = path.resolve(
       this.root,
@@ -529,6 +530,7 @@ export class Manager {
       merged: state.merged,
       paused: fs.existsSync(this.journalPath),
       pushRun: readPushRun(this),
+      uiWorktree: this.uiWorktree || null,
     };
   }
   tag(name, revisions = ["HEAD"]) {
@@ -739,7 +741,12 @@ export class Manager {
     };
   }
   createWorktree(base) {
-    const dir = path.join(this.dir, "worktrees", randomUUID());
+    const dir = this.uiWorktree
+      ? path.join(
+          path.dirname(this.uiWorktree.path),
+          `gh-prm-replay-${randomUUID()}`,
+        )
+      : path.join(this.dir, "worktrees", randomUUID());
     fs.mkdirSync(path.dirname(dir), { recursive: true });
     this.git("worktree", "add", "--detach", dir, base);
     return dir;

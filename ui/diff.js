@@ -168,6 +168,18 @@ globalThis.PrmDiff = (() => {
     let model = null,
       layout = mode === "split" ? "split" : "unified";
     const collapsed = new Map();
+    // Wrapped paths can change height as the inspector or window is resized.
+    // Measure file headers so sticky hunk headers sit immediately beneath them.
+    const ResizeObserver = document.defaultView?.ResizeObserver;
+    const headerObserver = ResizeObserver
+      ? new ResizeObserver((entries) => {
+          for (const { target } of entries)
+            target.parentElement.style.setProperty(
+              "--diff-file-header-height",
+              `${target.getBoundingClientRect().height}px`,
+            );
+        })
+      : null;
     const node = (tag, text, cls) => {
       const el = document.createElement(tag);
       if (text !== undefined) el.textContent = text;
@@ -301,6 +313,7 @@ globalThis.PrmDiff = (() => {
       if (!model) return;
       for (const el of container.querySelectorAll("details"))
         collapsed.set(el.dataset.collapseKey, !el.hasAttribute("open"));
+      headerObserver?.disconnect();
       const content = document.createDocumentFragment();
       container.dataset.mode = layout;
       if (model.preamble)
@@ -308,17 +321,21 @@ globalThis.PrmDiff = (() => {
       for (const [i, file] of model.files.entries()) {
         const section = disclosure(`file:${i}`, file.title, "diff-file");
         const summary = section.querySelector("summary");
-        summary.append(
-          node(
-            "span",
-            file.binary
-              ? "Binary file"
-              : file.hunks.length
-                ? `+${file.added} −${file.deleted}`
-                : "Metadata only",
-            "diff-stats",
-          ),
-        );
+        summary.title = file.title;
+        const stats = node("span", undefined, "diff-stats");
+        if (!file.binary && file.hunks.length) {
+          stats.append(
+            node("span", `+${file.added}`, "diff-stat-added"),
+            document.createTextNode(" "),
+            node("span", `−${file.deleted}`, "diff-stat-deleted"),
+          );
+          stats.setAttribute(
+            "aria-label",
+            `${file.added} added, ${file.deleted} removed`,
+          );
+        } else
+          stats.textContent = file.binary ? "Binary file" : "Metadata only";
+        summary.append(stats);
         if (file.unsupported) {
           section.append(
             node(
@@ -346,6 +363,8 @@ globalThis.PrmDiff = (() => {
         content.append(section);
       }
       container.replaceChildren(content);
+      for (const summary of container.querySelectorAll(".diff-file > summary"))
+        headerObserver?.observe(summary);
     }
     return {
       get mode() {
@@ -361,6 +380,7 @@ globalThis.PrmDiff = (() => {
         render();
       },
       setMessage(text) {
+        headerObserver?.disconnect();
         model = null;
         collapsed.clear();
         container.replaceChildren(node("p", text, "diff-message"));

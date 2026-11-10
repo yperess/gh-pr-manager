@@ -1180,7 +1180,13 @@ for (const vscodeMode of [false, true]) {
       vscodeMode,
       async ({ body, graph, emit }) => {
         assert.equal(body.wait, true);
+        graph.uiWorktree = {
+          path: "/tmp/gh-prm-test",
+          originalRoot: "/work/repo",
+          branch: "work",
+        };
         graph.pushRun = {
+          worktree: graph.uiWorktree.path,
           id: "run1",
           status: "running",
           features: graph.groups.map((g) => ({
@@ -1205,6 +1211,14 @@ for (const vscodeMode of [false, true]) {
     const wait = document.getElementById("push-wait");
     wait.checked = true;
     wait.dispatchEvent(new window.Event("change"));
+    assert.match(
+      document.getElementById("push-wait-help").textContent,
+      /isolated temporary checkout/,
+    );
+    assert.match(
+      document.getElementById("push-wait-help").textContent,
+      /becomes detached/,
+    );
     click("preview-push");
     await until(() => !document.getElementById("push-plan").hidden);
     assert.equal(document.querySelectorAll("#push-actions li").length, 3);
@@ -1218,6 +1232,11 @@ for (const vscodeMode of [false, true]) {
     );
     click("execute-push");
     await until(() => !document.getElementById("stop-push").hidden);
+    assert.equal(document.getElementById("workspace-info").hidden, false);
+    assert.match(
+      document.getElementById("workspace-info").textContent,
+      /\/tmp\/gh-prm-test/,
+    );
     assert.match(
       document.getElementById("push-run-summary").textContent,
       /1 pending/,
@@ -1456,6 +1475,64 @@ for (const vscodeMode of [false, true]) {
       !calls.some((call) =>
         ["tag", "deps", "metadata", "push"].includes(call.route),
       ),
+    );
+  });
+
+  test(`${vscodeMode ? "VS Code" : "Browser"} clears hidden commit diffs when switching features and ignores late patch responses`, async () => {
+    let resolvePending,
+      requests = 0;
+    const pendingPatch = new Promise((resolve) => {
+      resolvePending = resolve;
+    });
+    const { window, document, calls } = await editor(
+      vscodeMode,
+      undefined,
+      new Map(),
+      undefined,
+      async () => (++requests === 1 ? { diff: coloredPatch } : pendingPatch),
+    );
+    const click = (node) =>
+      node.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const feature = (name) =>
+      [...document.querySelectorAll(".feature-card")].find((node) =>
+        node.getAttribute("aria-label").startsWith(`${name}:`),
+      );
+    click(feature("feature1"));
+    click(document.querySelector(".commit-message"));
+    await until(() => document.querySelector(".diff-file"));
+    // Selecting the same feature still leaves the inspected commit visible.
+    click(feature("feature1"));
+    assert.ok(document.querySelector(".diff-file"));
+    click(feature("feature3"));
+    assert.equal(document.querySelectorAll(".diff-file").length, 0);
+    assert.equal(
+      document.getElementById("diff").textContent,
+      "No commit selected.",
+    );
+    assert.equal(
+      document.getElementById("diff-title").textContent,
+      "Commit details",
+    );
+    assert.equal(document.getElementById("diff-expand").disabled, true);
+    assert.equal(document.getElementById("metadata-panel").hidden, true);
+    assert.equal(
+      document.getElementById("inspector-title").textContent,
+      "feature3",
+    );
+    assert.equal(document.querySelectorAll("#commits tr.selected").length, 0);
+    click(feature("feature1"));
+    assert.equal(document.querySelectorAll("#commits tr.selected").length, 0);
+    click(document.querySelector(".commit-message"));
+    await until(
+      () => calls.filter((call) => call.route.startsWith("diff?")).length === 2,
+    );
+    click(feature("feature3"));
+    resolvePending({ diff: coloredPatch });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(document.querySelectorAll(".diff-file").length, 0);
+    assert.equal(
+      document.getElementById("diff").textContent,
+      "No commit selected.",
     );
   });
 

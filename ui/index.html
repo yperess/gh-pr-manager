@@ -19,6 +19,7 @@
   </header>
   <div id="error" role="alert" hidden></div>
   <section id="push-run-banner" class="push-run-banner" hidden aria-label="Continuous push"><span id="push-run-summary" role="status"></span><button id="stop-push-run" hidden>Stop push run</button></section>
+  <p id="workspace-info" class="muted" hidden role="status"></p>
   <main>
     <section class="canvas-panel">
       <div class="section-heading"><div><h2>Feature dependencies</h2><p>Independent features can be reviewed together. Arrows point from prerequisite to dependent.</p></div><div id="counts"></div></div>
@@ -85,7 +86,7 @@
     </div>
     <div id="push-choice" hidden><fieldset id="push-features" aria-label="Features to push"></fieldset><p id="push-choice-help" class="muted">A waiting feature pushes the full working history as a preview branch, without a PR.</p></div>
     <label class="continuous-option"><input id="push-wait" type="checkbox"> Keep pushing until done</label>
-    <p id="push-wait-help" class="muted" hidden>Include waiting features from this selection. Publish each PR after its prerequisites merge. New features are ignored; changed features are dropped. Stops when all remaining PRs are published or unreachable.</p>
+    <p id="push-wait-help" class="muted" hidden>Include waiting features from this selection. Publish each PR after its prerequisites merge. New features are ignored; changed features are dropped. Stops when all remaining PRs are published or unreachable. Runs in an isolated temporary checkout. Your current checkout keeps its files and becomes detached so you can switch to another branch. Keep this window open; the temporary checkout is retained afterward.</p>
     <button id="preview-push">Preview push</button>
     <div id="push-plan" hidden><h3>Push preview</h3><p id="push-target" class="muted"></p><ul id="push-actions"></ul><p class="muted">Remote adoption and isolation checks run during push.</p><button id="execute-push" class="primary" disabled>Push branches</button></div>
     <ul id="push-run-features" aria-label="Push run features" hidden></ul>

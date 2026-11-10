@@ -178,7 +178,7 @@ function result(manager, run) {
 export async function continuousPush(
   manager,
   options = {},
-  { signal, interval = 30000, sleep = delay } = {},
+  { signal, interval = 30000, sleep = delay, prepare } = {},
 ) {
   if (!Number.isFinite(interval) || interval <= 0)
     throw new Error("Invalid polling interval.");
@@ -191,12 +191,14 @@ export async function continuousPush(
     manager.onBranch(manager.state());
     manager.clean();
     const plan = planPushRun(manager, options);
+    if (prepare) manager = prepare(manager);
     run = {
       ...plan,
       id: randomUUID(),
       pid: process.pid,
       status: "running",
       startedAt: new Date().toISOString(),
+      ...(manager.uiWorktree ? { worktree: manager.root } : {}),
     };
     manager.pushRunId = run.id;
     save(manager, run);

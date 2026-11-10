@@ -5,6 +5,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { run } from "./core.js";
 import { pushRequest, operationRequest } from "./requests.js";
+import { resolveUiManager } from "./ui-worktree.js";
 import { requestBridge } from "./operations.js";
 
 const ui = fileURLToPath(new URL("../ui/", import.meta.url));
@@ -16,7 +17,7 @@ const assets = {
 };
 
 export function createServer(
-  manager,
+  sourceManager,
   token = randomBytes(32).toString("hex"),
   { operation } = {},
 ) {
@@ -48,6 +49,7 @@ export function createServer(
           !timingSafeEqual(supplied, secret)
         )
           return reply(403, { error: "Invalid session token." });
+        const manager = resolveUiManager(sourceManager);
         if (req.method === "GET" && url.pathname === "/api/graph")
           return reply(200, manager.graph());
         if (req.method === "GET" && url.pathname === "/api/pr-status") {
@@ -173,7 +175,7 @@ export function createServer(
 }
 
 export async function serve(manager, { port = 0, open = true } = {}) {
-  manager.graph(); // Fail before launching if uninitialized or on the wrong branch.
+  resolveUiManager(manager).graph(); // Fail before launching if uninitialized or on the wrong branch.
   if (!Number.isInteger(port) || port < 0 || port > 65535)
     throw new Error("Invalid port.");
   const { server, token } = createServer(manager);

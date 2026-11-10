@@ -12,7 +12,7 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node --check src/core.js && node --check src/push-run.js && node --check src/pr-status.js && node --check src/operations.js && node --check src/requests.js && node --check src/bridge.js && node --check src/cli.js && node --check src/server.js && node --check ui/app.js && node --check ui/diff.js && node --check vscode/extension.cjs",
+    "check": "node --check src/core.js && node --check src/push-run.js && node --check src/pr-status.js && node --check src/operations.js && node --check src/requests.js && node --check src/ui-worktree.js && node --check src/bridge.js && node --check src/cli.js && node --check src/server.js && node --check ui/app.js && node --check ui/diff.js && node --check vscode/extension.cjs",
     "package:vscode": "node scripts/package-vscode.js",
     "format": "prettier --write \"src/*.js\" \"ui/*.js\" \"ui/*.css\" \"scripts/*.js\" \"test/*.js\" \"vscode/*.cjs\" \"vscode/*.json\" package.json",
     "format:check": "prettier --check \"src/*.js\" \"ui/*.js\" \"ui/*.css\" \"scripts/*.js\" \"test/*.js\" \"vscode/*.cjs\" \"vscode/*.json\" package.json"

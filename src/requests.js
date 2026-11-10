@@ -1,4 +1,5 @@
 import { continuousPush, planPushRun, stopPushRun } from "./push-run.js";
+import { prepareUiWorktree } from "./ui-worktree.js";
 
 // Both UI transports use the same validation and core push workflow.
 export function pushRequest(manager, data, { signal } = {}) {
@@ -19,7 +20,10 @@ export function pushRequest(manager, data, { signal } = {}) {
     const options = { names: data.names, expectedRevision: data.revision };
     return data.dryRun
       ? { ...planPushRun(manager, options), continuous: true, dryRun: true }
-      : continuousPush(manager, options, { signal });
+      : continuousPush(manager, options, {
+          signal,
+          prepare: prepareUiWorktree,
+        });
   }
   return {
     ...manager.push({
