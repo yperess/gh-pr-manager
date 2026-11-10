@@ -23,6 +23,29 @@ import { createServer } from "../src/server.js";
 import { pushRequest, operationRequest } from "../src/requests.js";
 import { requestBridge } from "../src/operations.js";
 
+test("failed commands retain hook stdout as well as Git stderr", () => {
+  assert.throws(
+    () =>
+      run(
+        process.execPath,
+        [
+          "-e",
+          'process.stdout.write("Formatting check failed\\n"); process.stderr.write("Failed to push refs\\n"); process.exit(1);',
+        ],
+        os.tmpdir(),
+      ),
+    (error) => {
+      assert.equal(error.status, 1);
+      assert.ok(
+        error.message.endsWith(
+          "\nFormatting check failed\nFailed to push refs",
+        ),
+      );
+      return true;
+    },
+  );
+});
+
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "prm-test-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -2352,4 +2375,421 @@ test("failed UI checkout handoff restores the original branch without forcing aw
     f.git("worktree", "list", "--porcelain").match(/^worktree /gm).length,
     1,
   );
+});
+
+test("feature net diff excludes interleaved siblings and reverted changes while preserving a dirty checkout", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("one", [f.commit("A", "base.txt", "first version\n")]);
+  m.tag("sibling", [f.commit("B", "sibling.txt", "unrelated\n")]);
+  m.tag("one", [f.commit("C", "base.txt", "final version  \n")]);
+  m.tag("one", [f.commit("temporary", "temporary.txt", "discard me\n")]);
+  f.git("rm", "temporary.txt");
+  f.git("commit", "-m", "Undo temporary file");
+  m.tag("one", [m.head()]);
+  f.git("config", "color.ui", "always");
+  fs.writeFileSync(path.join(f.root, "base.txt"), "staged work\n");
+  f.git("add", "base.txt");
+  const index = f.git("write-tree");
+  fs.writeFileSync(path.join(f.root, "base.txt"), "unstaged work\n");
+  fs.writeFileSync(path.join(f.root, "untracked.txt"), "keep me\n");
+  const head = m.head(),
+    notes = f.git("rev-parse", NOTES),
+    state = fs.readFileSync(m.statePath, "utf8"),
+    status = f.git("status", "--porcelain");
+  const result = m.featureDiff("one", { expectedRevision: m.graph().revision });
+  assert.equal(result.commitCount, 4);
+  assert.match(result.diff, /-base\n\+final version  \n/);
+  assert.ok(!result.diff.includes("sibling.txt"));
+  assert.ok(!result.diff.includes("temporary.txt"));
+  assert.ok(!result.diff.includes("\u001b["));
+  assert.equal(m.head(), head);
+  assert.equal(m.branch(), "work");
+  assert.equal(f.git("write-tree"), index);
+  assert.equal(f.git("status", "--porcelain"), status);
+  assert.equal(
+    fs.readFileSync(path.join(f.root, "base.txt"), "utf8"),
+    "unstaged work\n",
+  );
+  assert.equal(
+    fs.readFileSync(path.join(f.root, "untracked.txt"), "utf8"),
+    "keep me\n",
+  );
+  assert.equal(f.git("rev-parse", NOTES), notes);
+  assert.equal(fs.readFileSync(m.statePath, "utf8"), state);
+  assert.equal(
+    f.git("worktree", "list", "--porcelain").match(/^worktree /gm).length,
+    1,
+  );
+});
+
+test("feature net diff applies a shared transitive dependency once and excludes prerequisites before and after merging", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("foundation", [f.commit("Foundation", "context.txt", "foundation\n")]);
+  m.tag("left", [f.commit("Left", "context.txt", "foundation\nleft\n")]);
+  m.dependencies("left", ["foundation"]);
+  m.tag("right", [f.commit("Right", "right.txt", "right prerequisite\n")]);
+  m.dependencies("right", ["foundation"]);
+  m.tag("sibling", [f.commit("Unrelated")]);
+  m.tag("target", [
+    f.commit("Feature1", "context.txt", "foundation\nleft\nfeature\n"),
+  ]);
+  m.tag("target", [
+    f.commit("Feature2", "right.txt", "right prerequisite\nfeature right\n"),
+  ]);
+  m.dependencies("target", ["left", "right"]);
+  const before = m.featureDiff("target");
+  assert.deepEqual(
+    before.diff
+      .split("\n")
+      .filter((line) => line.startsWith("+") && !line.startsWith("+++")),
+    ["+feature", "+feature right"],
+  );
+  assert.ok(!before.diff.includes("Unrelated.txt"));
+  m.push({ names: ["foundation"] });
+  f.merge("foundation");
+  m.sync();
+  assert.ok(Object.hasOwn(m.graph().merged, "foundation"));
+  assert.equal(m.featureDiff("target").diff, before.diff);
+});
+
+test("feature net diffs report empty changes, stale requests, missing dependencies, and repository races without retaining worktrees", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("empty", [f.commit("Temporary", "temporary.txt", "discard\n")]);
+  f.git("rm", "temporary.txt");
+  f.git("commit", "-m", "Revert temporary");
+  m.tag("empty", [m.head()]);
+  assert.equal(m.featureDiff("empty").diff, "");
+  m.tag("parent", [f.commit("Parent", "required.txt", "prerequisite\n")]);
+  m.tag("child", [f.commit("Child", "required.txt", "prerequisite\nchild\n")]);
+  const head = m.head();
+  assert.throws(() => m.featureDiff("child"), /Check its dependencies/);
+  assert.throws(
+    () => m.featureDiff("child", { expectedRevision: "stale" }),
+    /repository changed/i,
+  );
+  assert.throws(() => m.featureDiff("unknown"), /Unknown active feature/);
+  m.dependencies("child", ["parent"]);
+  const replay = m.replay.bind(m);
+  let changed = false;
+  m.replay = (...args) => {
+    const result = replay(...args);
+    if (!changed) {
+      changed = true;
+      m.writeNote(head, `${m.note(head)}\nExternal edit`);
+    }
+    return result;
+  };
+  assert.throws(
+    () => m.featureDiff("child"),
+    /repository changed while building/i,
+  );
+  assert.equal(m.head(), head);
+  assert.equal(f.git("status", "--porcelain"), "");
+  assert.equal(
+    f.git("worktree", "list", "--porcelain").match(/^worktree /gm).length,
+    1,
+  );
+});
+
+test("feature net diff browser and VS Code transports validate revisions and stream the same read-only projection", async (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("one", [f.commit("A")]);
+  const data = { name: "one", revision: m.graph().revision };
+  const bridge = new URL("../src/bridge.js", import.meta.url).pathname;
+  const progress = [];
+  const projected = await requestBridge(
+    f.root,
+    bridge,
+    { route: "feature-diff", data },
+    (event) => progress.push(event.command),
+  );
+  assert.match(projected.diff, /\+A\n/);
+  assert.ok(progress.some((command) => command.startsWith("git cherry-pick")));
+  const { server, token } = createServer(m);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/api/feature-diff`;
+  const request = (body, authenticated = true) =>
+    fetch(url, {
+      method: "POST",
+      headers: authenticated ? { "X-PRM-Token": token } : {},
+      body: JSON.stringify(body),
+    });
+  assert.equal((await request(data, false)).status, 403);
+  assert.equal((await request({ ...data, revision: "stale" })).status, 409);
+  const response = await request(data);
+  assert.match(response.headers.get("content-type"), /ndjson/);
+  const events = (await response.text()).trim().split("\n").map(JSON.parse);
+  assert.equal(events.at(-1).result.diff, projected.diff);
+  await assert.rejects(
+    () =>
+      requestBridge(f.root, bridge, {
+        route: "feature-diff",
+        data: { ...data, name: 42 },
+      }),
+    /Provide a feature name/,
+  );
+  assert.equal(
+    f.git("worktree", "list", "--porcelain").match(/^worktree /gm).length,
+    1,
+  );
+});
+
+test("feature net diff disconnects leave no projection worktrees and keep graph reads responsive", async (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("one", [f.commit("A")]);
+  const head = m.head(),
+    hooks = path.join(f.dir, "preview-hooks"),
+    started = path.join(f.dir, "preview-started"),
+    release = path.join(f.dir, "preview-release");
+  fs.mkdirSync(hooks);
+  fs.writeFileSync(
+    path.join(hooks, "post-checkout"),
+    `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(started)}, 'started');
+const wait = new Int32Array(new SharedArrayBuffer(4)), deadline = Date.now() + 10000;
+while (!fs.existsSync(${JSON.stringify(release)})) {
+  if (Date.now() > deadline) process.exit(1);
+  Atomics.wait(wait, 0, 0, 20);
+}
+`,
+    { mode: 0o755 },
+  );
+  f.git("config", "core.hooksPath", hooks);
+  const { server, token } = createServer(m);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/api/`,
+    headers = { "X-PRM-Token": token };
+  const response = await fetch(`${url}feature-diff`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ name: "one", revision: m.graph().revision }),
+  });
+  for (let i = 0; !fs.existsSync(started) && i < 300; i++)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(fs.existsSync(started), "Projection checkout hook started");
+  assert.equal(
+    (await (await fetch(`${url}graph`, { headers })).json()).head,
+    head,
+  );
+  await response.body.cancel();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  fs.writeFileSync(release, "continue");
+  for (let i = 0; i < 300; i++) {
+    if (
+      f.git("worktree", "list", "--porcelain").match(/^worktree /gm).length ===
+      1
+    )
+      break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(
+    f.git("worktree", "list", "--porcelain").match(/^worktree /gm).length,
+    1,
+  );
+  assert.equal(m.head(), head);
+  assert.equal(f.git("status", "--porcelain"), "");
+});
+
+function enableTestSigning(t, f) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "prm-gpg-"));
+  fs.chmodSync(home, 0o700);
+  const previous = process.env.GNUPGHOME;
+  process.env.GNUPGHOME = home;
+  t.after(() => {
+    try {
+      run("gpgconf", ["--homedir", home, "--kill", "gpg-agent"], os.tmpdir());
+    } catch {}
+    if (previous === undefined) delete process.env.GNUPGHOME;
+    else process.env.GNUPGHOME = previous;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  const identity = "PR Manager Signing Test <prm-signing@example.test>";
+  run(
+    "gpg",
+    [
+      "--batch",
+      "--pinentry-mode",
+      "loopback",
+      "--passphrase",
+      "",
+      "--quick-generate-key",
+      identity,
+      "ed25519",
+      "sign",
+      "0",
+    ],
+    home,
+  );
+  const fingerprint = run(
+    "gpg",
+    ["--with-colons", "--list-secret-keys", identity],
+    home,
+  )
+    .split("\n")
+    .find((line) => line.startsWith("fpr:"))
+    .split(":")[9];
+  f.git("config", "user.signingkey", fingerprint);
+  f.git("config", "gpg.format", "openpgp");
+  f.git("config", "commit.gpgsign", "true");
+}
+
+test("signing repairs unsigned PR commits, preserves signed unchanged heads, and signs synced source history", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  const a = f.commit("A");
+  m.tag("one", [a]);
+  m.tag("two", [f.commit("B")]);
+  m.dependencies("two", ["one"]);
+  m.push({ names: ["one"] });
+  const unsigned = m.state().features.one.publishedHead;
+  assert.equal(
+    run("git", ["show", "-s", "--format=%G?", unsigned], f.root),
+    "N",
+  );
+  const pr = m.state().features.one.pr;
+  enableTestSigning(t, f);
+  m.push({ names: ["one"] });
+  const signed = m.state().features.one.publishedHead;
+  assert.notEqual(signed, unsigned);
+  run("git", ["verify-commit", signed], f.bare);
+  assert.equal(m.state().features.one.pr, pr);
+  f.updatePrHeads();
+  const replay = m.replay.bind(m);
+  const git = m.git.bind(m);
+  m.replay = () => assert.fail("Unchanged signed PRs must not be replayed");
+  m.git = (...args) => {
+    assert.notEqual(args[0], "push", "Unchanged PRs must not be pushed");
+    return git(...args);
+  };
+  m.push({ names: ["one"] });
+  assert.equal(m.state().features.one.publishedHead, signed);
+  m.replay = replay;
+  m.git = git;
+  f.merge("one");
+  m.sync();
+  run("git", ["verify-commit", m.head()], f.root);
+  assert.equal(parseNote(m.note(m.head())).name, "two");
+});
+
+test("signing covers every commit in explicitly selected blocked preview histories", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("one", [f.commit("A")]);
+  m.tag("two", [f.commit("B")]);
+  m.dependencies("two", ["one"]);
+  enableTestSigning(t, f);
+  const result = m.push({ names: ["two"] });
+  assert.equal(result.pushed.length, 0);
+  assert.equal(result.previews.length, 1);
+  const commits = run(
+    "git",
+    ["rev-list", "main..refs/heads/prm/two"],
+    f.bare,
+  ).split("\n");
+  assert.equal(commits.length, 2);
+  for (const sha of commits) run("git", ["verify-commit", sha], f.bare);
+});
+
+test("signing failures stop publication while disposable diffs and adoption checks stay unsigned", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("one", [f.commit("A")]);
+  m.push({ names: ["one"] });
+  const published = m.state().features.one.publishedHead,
+    head = m.head();
+  const signer = path.join(f.dir, "unavailable-gpg");
+  fs.writeFileSync(
+    signer,
+    "#!/bin/sh\necho 'Signing agent unavailable' >&2\nexit 1\n",
+    { mode: 0o755 },
+  );
+  f.git("config", "gpg.program", signer);
+  f.git("config", "commit.gpgsign", "true");
+  assert.match(m.featureDiff("one").diff, /\+A\n/);
+  m.verifyAdoption(m.state(), m.graph().groups[0], published, {
+    explicit: true,
+  });
+  assert.throws(
+    () => m.push({ names: ["one"] }),
+    /Signing agent unavailable|gpg failed to sign/,
+  );
+  assert.equal(m.state().features.one.publishedHead, published);
+  assert.equal(
+    run("git", ["rev-parse", "refs/heads/prm/one"], f.bare),
+    published,
+  );
+  assert.equal(m.head(), head);
+  assert.equal(
+    f.git("worktree", "list", "--porcelain").match(/^worktree /gm).length,
+    1,
+  );
+});
+
+test("sync continue honors signing configuration after resolving a conflict", (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("one", [f.commit("Local", "base.txt", "local\n")]);
+  const dir = m.createWorktree("origin/main");
+  fs.writeFileSync(path.join(dir, "base.txt"), "remote\n");
+  run("git", ["add", "base.txt"], dir);
+  run("git", ["commit", "-m", "Remote"], dir);
+  run("git", ["push", "origin", "HEAD:main"], dir);
+  m.removeWorktree(dir);
+  enableTestSigning(t, f);
+  assert.throws(() => m.sync(), /Sync paused/);
+  const journal = JSON.parse(fs.readFileSync(m.journalPath, "utf8"));
+  fs.writeFileSync(path.join(journal.dir, "base.txt"), "resolved\n");
+  run("git", ["add", "base.txt"], journal.dir);
+  m.sync({ continue: true });
+  run("git", ["verify-commit", m.head()], f.root);
+  assert.equal(parseNote(m.note(m.head())).name, "one");
+});
+
+test("restarting a continuous signed push watches unchanged PRs without replaying or pushing", async (t) => {
+  const f = fixture(t),
+    m = f.manager;
+  m.tag("one", [f.commit("A")]);
+  m.tag("two", [f.commit("B")]);
+  m.dependencies("two", ["one"]);
+  enableTestSigning(t, f);
+  m.push({ names: ["one"] });
+  f.updatePrHeads();
+  const published = m.state().features.one.publishedHead;
+  const git = m.git.bind(m);
+  m.git = (...args) => {
+    assert.notEqual(args[0], "push", "Restart must not invoke git push");
+    return git(...args);
+  };
+  m.replay = () => assert.fail("Restart must not cherry-pick or sign");
+  let polls = 0;
+  const result = await continuousPush(
+    m,
+    {},
+    {
+      interval: 1,
+      sleep: async () => {
+        assert.equal(++polls, 1);
+        const run = readPushRun(m);
+        assert.equal(
+          run.features.find((f) => f.name === "one").status,
+          "published",
+        );
+        assert.equal(
+          run.features.find((f) => f.name === "two").status,
+          "pending",
+        );
+        stopPushRun(m, run.id);
+      },
+    },
+  );
+  assert.equal(result.run.status, "cancelled");
+  assert.equal(m.state().features.one.publishedHead, published);
 });

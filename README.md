@@ -482,7 +482,15 @@ gh prm view --dot > graph.dot    # Graphviz DOT, including commits and groups
 gh prm view --json               # full machine-readable graph
 ```
 
-Commit patches use green additions, red deletions, and old/new line numbers.
+Select a feature to see the net diff of all its commits; select a commit to see
+just that patch. Selecting the feature again restores its net diff, and clearing
+the graph selection clears the patch. Feature previews use a temporary worktree,
+apply unmerged prerequisites first, and exclude their changes and unrelated
+features from the result. Reverted changes cancel out. Previews use the locally
+known base without fetching or changing your checkout, notes, or PR tracking;
+missing dependencies or replay conflicts appear as an error in the diff panel.
+
+Patches use green additions, red deletions, and old/new line numbers.
 Switch between **Unified** (top/down) and **Side by side** above the patch; the
 choice is remembered in the browser session or VS Code webview state. Split
 panes share vertical alignment and synchronize horizontal scrolling. Files and
@@ -546,9 +554,25 @@ notes preservation, backup, and recovery journal. Conflicts stop with the same
 worktree path and `gh prm sync --continue` / `--abort` instructions as the CLI.
 
 Operations run in background processes so commands appear while they execute.
-The dialog cannot be closed and another operation cannot start until the running
-operation finishes. Long Git hooks and network operations are allowed to finish
+One-shot push and sync dialogs stay open until their operation finishes.
+Continuous pushes can be dismissed while they run: use **View progress** in the
+run banner to reopen the dialog, or **Stop push run** to cancel. Refresh, diff
+inspection, and note editing remain available; changed features are dropped from
+the run. Another push or manual sync cannot start until the run finishes. Keep
+the browser tab or extension view open; closing it cancels the run. Long Git hooks and network operations are allowed to finish
 without the normal read-request timeout. Refresh reloads local state and PR status.
+
+Published projections and rewritten sync history honor the repository's Git
+signing settings (`commit.gpgsign`, `user.signingkey`, and `gpg.format`). Configure
+signing separately in each repository; for example, enable PGP signing in a work
+repository and disable it in a personal repository. Your signing agent/pinentry
+must be available to the UI process. Signing errors stop publication. Feature
+diffs and verification-only scratch commits remain unsigned. When signing is
+enabled, unsigned or unverifiable published heads are rebuilt on the next push
+instead of being reused; already signed, unchanged PRs retain their commit IDs.
+Restarting a push verifies and reuses those heads without cherry-picking, signing,
+or invoking Git push for them.
+Explicitly selected blocked preview branches are rebuilt with signatures too.
 
 Push and sync use the same hooks, isolation, leases, adoption rules, and
 clean-tree checks as the CLI. They never stash changes. A changed source, notes,
@@ -704,8 +728,8 @@ recovery, remote collisions, and editor HTTP authorization.
 
 This initial version supports **linear source history** and one working branch
 per clone. Merge commits are rejected by push/sync. Generated commits preserve
-author and committer metadata, but are unsigned; repositories requiring signed
-commits need signing support before using publication. Dependencies represent
+author and committer metadata and honor the repository's Git signing settings.
+Dependencies represent
 merge gates, not automatic semantic dependency detection: a cherry-pick that
 applies cleanly can still need code from another feature. Run the target
 repository's own tests on PR projections as appropriate.

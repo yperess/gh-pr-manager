@@ -46,9 +46,11 @@ export function run(command, args, cwd, options = {}) {
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
-    const error = new Error(
-      `${command} ${args.join(" ")}\n${result.stderr || result.stdout}`.trim(),
-    );
+    const output = [result.stdout, result.stderr]
+      .filter(Boolean)
+      .map((text) => text.trimEnd())
+      .join("\n");
+    const error = new Error(`${command} ${args.join(" ")}\n${output}`.trim());
     error.status = result.status;
     throw error;
   }
@@ -740,6 +742,84 @@ export class Manager {
       unassigned: graph.commits.filter((c) => !c.name),
     };
   }
+  featureDiff(name, { expectedRevision } = {}) {
+    validName(name);
+    // A private worktree and final snapshot check let previews coexist with push/sync.
+    const graph = this.graph();
+    if (expectedRevision && expectedRevision !== graph.revision)
+      throw new Error(
+        "The repository changed. Refresh before loading the feature diff.",
+      );
+    validateGraph(graph.groups, graph.merged);
+    const group = graph.groups.find((g) => g.name === name);
+    if (!group) throw new Error(`Unknown active feature ${name}.`);
+    const prerequisites = [],
+      seen = new Set();
+    const visit = (dependency) => {
+      if (seen.has(dependency) || Object.hasOwn(graph.merged, dependency))
+        return;
+      seen.add(dependency);
+      const parent = graph.groups.find((g) => g.name === dependency);
+      for (const dep of parent.deps) visit(dep);
+      prerequisites.push(parent);
+    };
+    for (const dep of group.deps) visit(dep);
+    const selected = new Set(
+      [...prerequisites, group].flatMap((g) => g.commits),
+    );
+    if (graph.commits.some((c) => selected.has(c.sha) && c.parents.length > 1))
+      throw new Error(
+        "Merge commits are unsupported. Use a linear working branch.",
+      );
+    const base = this.git("rev-parse", this.baseRef(this.state()));
+    const dir = this.createWorktree(base);
+    try {
+      const replay = (feature) => {
+        try {
+          for (const sha of feature.commits)
+            this.replay(dir, sha, { unsigned: true });
+        } catch (error) {
+          throw new Error(
+            `Cannot build the diff context for ${feature.name}. Check its dependencies.\n${error.message}`,
+          );
+        }
+      };
+      // Prerequisites supply context but are excluded from the net patch.
+      for (const parent of prerequisites) replay(parent);
+      const before = run("git", ["rev-parse", "HEAD"], dir);
+      replay(group);
+      const diff = run(
+        "git",
+        [
+          "diff",
+          "--no-color",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--find-renames",
+          before,
+          "HEAD",
+          "--",
+        ],
+        dir,
+        { trimEnd: false },
+      );
+      if (
+        this.graph().revision !== graph.revision ||
+        this.git("rev-parse", this.baseRef(this.state())) !== base
+      )
+        throw new Error(
+          "The repository changed while building the feature diff. Refresh and retry.",
+        );
+      return {
+        name,
+        diff,
+        commitCount: group.commits.length,
+        revision: graph.revision,
+      };
+    } finally {
+      this.removeWorktree(dir);
+    }
+  }
   createWorktree(base) {
     const dir = this.uiWorktree
       ? path.join(
@@ -754,7 +834,7 @@ export class Manager {
   removeWorktree(dir) {
     this.git("worktree", "remove", "--force", dir);
   }
-  replay(dir, sha) {
+  replay(dir, sha, { unsigned = false } = {}) {
     this.progress(`git cherry-pick ${sha}`);
     const [name, email, date] = this.git(
       "show",
@@ -765,8 +845,7 @@ export class Manager {
     run(
       "git",
       [
-        "-c",
-        "commit.gpgsign=false",
+        ...(unsigned ? ["-c", "commit.gpgsign=false"] : []),
         "cherry-pick",
         "--allow-empty",
         "--keep-redundant-commits",
@@ -813,6 +892,24 @@ export class Manager {
       ]),
     );
   }
+  signingEnabled() {
+    try {
+      return this.git("config", "--bool", "--get", "commit.gpgsign") === "true";
+    } catch (error) {
+      if (error.status === 1) return false;
+      throw error;
+    }
+  }
+  reusableSignedHistory(state, head, signingRequired = this.signingEnabled()) {
+    if (!signingRequired) return true;
+    const base = this.git("merge-base", this.baseRef(state), head);
+    const commits = this.git("rev-list", `${base}..${head}`)
+      .split("\n")
+      .filter(Boolean);
+    return commits.every(
+      (sha) => this.optionalGit("verify-commit", sha) !== null,
+    );
+  }
   unchangedProjection(state, group, feature, projection) {
     const previous = feature.publishedCommits;
     if (!Array.isArray(previous) || previous.length !== group.commits.length)
@@ -832,7 +929,7 @@ export class Manager {
     try {
       for (let i = 0; i < previous.length; i++) {
         try {
-          this.replay(dir, previous[i]);
+          this.replay(dir, previous[i], { unsigned: true });
         } catch {
           return false;
         }
@@ -877,7 +974,8 @@ export class Manager {
       ) {
         const dir = this.createWorktree(base);
         try {
-          for (const sha of group.commits) this.replay(dir, sha);
+          for (const sha of group.commits)
+            this.replay(dir, sha, { unsigned: true });
           equivalent =
             this.git("rev-parse", `${incoming}^{tree}`) ===
             run("git", ["rev-parse", "HEAD^{tree}"], dir);
@@ -1063,13 +1161,36 @@ export class Manager {
               `PR #${pr.number} is closed. Reopen it before pushing.`,
             );
         }
+      const signingRequired = this.signingEnabled();
       const result = { pushed: [], previews: [], blocked: plan.blocked };
       // Build every ready projection before any remote writes: missing code dependencies
       // fail locally without publishing a partial batch.
       const projections = [];
       try {
         for (const group of selected) {
-          if (!group.ready) {
+          const feature = Object.hasOwn(state.features, group.name)
+            ? state.features[group.name]
+            : null;
+          // Restarting a push must not invoke the signer for an unchanged PR.
+          // The remote head and PR state are still checked before publication.
+          if (
+            group.ready &&
+            feature?.state === "OPEN" &&
+            feature.pr &&
+            feature.publishedHead &&
+            Array.isArray(feature.publishedCommits) &&
+            JSON.stringify(feature.publishedCommits) ===
+              JSON.stringify(group.commits) &&
+            this.reusableSignedHistory(
+              state,
+              feature.publishedHead,
+              signingRequired,
+            )
+          ) {
+            projections.push({ group, dir: null, head: feature.publishedHead });
+            continue;
+          }
+          if (!group.ready && !signingRequired) {
             // Explicitly selected blocked features get the full integration history,
             // not an isolated projection. They never get a pull request.
             projections.push({ group, dir: null, head: this.head() });
@@ -1079,15 +1200,19 @@ export class Manager {
           const projection = { group, dir, trees: [] };
           projections.push(projection);
           try {
-            for (const sha of group.commits) {
+            const commits = group.ready
+              ? group.commits
+              : this.commits(state).map((c) => c.sha);
+            for (const sha of commits) {
               this.replay(dir, sha);
+              if (signingRequired) run("git", ["verify-commit", "HEAD"], dir);
               projection.trees.push(
                 run("git", ["rev-parse", "HEAD^{tree}"], dir),
               );
             }
           } catch (e) {
             throw new Error(
-              `Cannot isolate ${group.name}. Add the missing dependency or make its commits independent.\n${e.message}`,
+              `Cannot isolate ${group.name}. Check the replay or signing error below.\n${e.message}`,
             );
           }
           projections.at(-1).head = run("git", ["rev-parse", "HEAD"], dir);
@@ -1111,14 +1236,16 @@ export class Manager {
                 `Remote branch ${feature.branch} changed outside prm. Refusing to overwrite it.`,
               );
             this.verifyAdoption(state, group, existing);
-            // Keep the existing commit IDs on initial adoption.
-            projection.head = existing;
+            // Preserve verified signed heads; repair older unsigned projections.
+            if (this.reusableSignedHistory(state, existing, signingRequired))
+              projection.head = existing;
           }
           if (
             existing &&
             existing === feature.publishedHead &&
             group.ready &&
             feature.state === "OPEN" &&
+            this.reusableSignedHistory(state, existing, signingRequired) &&
             this.unchangedProjection(state, group, feature, projection)
           ) {
             projection.head = existing;
@@ -1325,7 +1452,7 @@ export class Manager {
   projectionMatches(commits, base, tree) {
     const dir = this.createWorktree(base);
     try {
-      for (const sha of commits) this.replay(dir, sha);
+      for (const sha of commits) this.replay(dir, sha, { unsigned: true });
       return run("git", ["rev-parse", "HEAD^{tree}"], dir) === tree;
     } catch {
       return false;
@@ -1500,14 +1627,7 @@ export class Manager {
           ) {
             run(
               "git",
-              [
-                "-c",
-                "core.editor=true",
-                "-c",
-                "commit.gpgsign=false",
-                "cherry-pick",
-                "--continue",
-              ],
+              ["-c", "core.editor=true", "cherry-pick", "--continue"],
               journal.dir,
             );
           }

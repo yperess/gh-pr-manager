@@ -99,7 +99,9 @@ export function createServer(
             error: "The repository changed. Refresh before editing.",
           });
         if (
-          ["/api/sync", "/api/adopt"].includes(url.pathname) ||
+          ["/api/sync", "/api/adopt", "/api/feature-diff"].includes(
+            url.pathname,
+          ) ||
           (url.pathname === "/api/push" && data.dryRun === false)
         ) {
           const route = url.pathname.slice(5);

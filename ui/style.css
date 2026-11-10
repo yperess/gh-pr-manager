@@ -354,8 +354,7 @@ aside {
   padding: 3px 8px;
 }
 .history-table {
-  max-height: 360px;
-  overflow: auto;
+  overflow-x: auto;
 }
 table {
   width: 100%;
@@ -624,8 +623,6 @@ footer {
   gap: 8px;
 }
 .diff-viewer {
-  max-height: 560px;
-  overflow: auto;
   padding: 0 24px 24px;
 }
 .diff-viewer pre {

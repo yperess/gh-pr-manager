@@ -16,7 +16,7 @@ try {
   const { route, data, stream: requestedStream } = JSON.parse(input);
   stream =
     requestedStream === true &&
-    (["sync", "adopt"].includes(route) ||
+    (["sync", "adopt", "feature-diff"].includes(route) ||
       (route === "push" && data?.dryRun === false));
   const manager = resolveUiManager(
     new Manager(process.cwd(), undefined, {
@@ -26,7 +26,7 @@ try {
     }),
   );
   const controller = new AbortController();
-  if (route === "push" && data?.wait) {
+  if ((route === "push" && data?.wait) || route === "feature-diff") {
     process.on("SIGTERM", () => controller.abort());
     process.on("SIGINT", () => controller.abort());
   }
@@ -56,7 +56,7 @@ try {
   } else {
     if (route !== "push-stop" && data?.revision !== manager.graph().revision)
       throw new Error("The repository changed. Refresh before editing.");
-    if (["push", "sync", "adopt", "push-stop"].includes(route))
+    if (["push", "sync", "adopt", "push-stop", "feature-diff"].includes(route))
       result = await operationRequest(manager, route, data, {
         signal: controller.signal,
       });

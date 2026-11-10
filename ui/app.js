@@ -27,7 +27,8 @@ const selectedCommits = new Set();
 const pending = new Map();
 let requestId = 0;
 let pushPlan = null,
-  publishing = false;
+  publishing = false,
+  backgroundPush = false;
 const pushFeatures = new Set();
 let pushMode = "ready",
   adoptingFeature = null;
@@ -46,6 +47,8 @@ const diffViewer = PrmDiff.createViewer(document, $("diff"), {
   mode: savedDiffMode,
 });
 let diffRequestVersion = 0;
+let diffFeature = null,
+  featureDiffKey = null;
 function updateDiffControls() {
   $("diff-unified").setAttribute(
     "aria-pressed",
@@ -96,15 +99,16 @@ window.addEventListener("message", (event) => {
 async function api(route, data, onProgress) {
   if (
     publishing &&
+    !backgroundPush &&
     data &&
-    !["push", "sync", "adopt", "push-stop"].includes(route)
+    !["push", "sync", "adopt", "push-stop", "feature-diff"].includes(route)
   )
     throw new Error("Wait for the operation to finish before editing.");
   if (vscode)
     return new Promise((resolve, reject) => {
       const id = ++requestId;
       const timeout =
-        ["sync", "adopt"].includes(route) ||
+        ["sync", "adopt", "feature-diff"].includes(route) ||
         (route === "push" && data?.dryRun === false)
           ? null
           : setTimeout(() => {
@@ -493,19 +497,19 @@ function renderGraph() {
 }
 function filterFeatureHistory(name) {
   historyFeature = name;
-  selectFeature(name, true);
-  renderCommits();
+  openFeature(name);
 }
 function clearFeatureHistory() {
   historyFeature = null;
   selectedFeature = undefined;
-  if (inspectorMode === "feature") {
-    $("inspector").hidden = true;
-    $("inspector-title").textContent = "Manage a feature";
-    $("inspector-hint").hidden = false;
-    $("inspector-hint").textContent =
-      "Select a feature in the graph to edit its dependencies.";
-  }
+  resetDiffSelection();
+  inspectorMode = "feature";
+  $("metadata-panel").hidden = true;
+  $("inspector").hidden = true;
+  $("inspector-title").textContent = "Manage a feature";
+  $("inspector-hint").hidden = false;
+  $("inspector-hint").textContent =
+    "Select a feature in the graph to edit its dependencies.";
   renderGraph();
   renderCommits();
 }
@@ -531,13 +535,12 @@ function renderCommits() {
     ? graph.commits.filter((c) => c.name === historyFeature)
     : graph.commits;
   if (selectedCommit && !commits.some((c) => c.sha === selectedCommit)) {
-    selectedCommit = null;
+    resetDiffSelection();
     inspectorMode = "feature";
     $("metadata-panel").hidden = true;
-    $("diff-title").textContent = "Commit details";
-    ++diffRequestVersion;
-    diffMessage("No commit selected.");
+    diffFeature = selectedFeature || null;
   }
+  if (diffFeature) void loadFeatureDiff(diffFeature);
   $("history-context").textContent = historyFeature
     ? `${historyFeature} · ${commits.length} of ${graph.commits.length} commits · Click empty canvas or press Escape to show all`
     : "Oldest first · colors connect commits to their PR group";
@@ -577,7 +580,7 @@ function renderCommits() {
     featureCell.append(dot);
     if (c.name) {
       const b = element("button", c.name, "feature-label");
-      b.addEventListener("click", () => selectFeature(c.name, true));
+      b.addEventListener("click", () => openFeature(c.name));
       featureCell.append(b);
     } else featureCell.append(element("span", "Unassigned", "muted"));
     row.append(featureCell);
@@ -600,6 +603,52 @@ function renderCommits() {
 function updateSelected() {
   $("tag-button").textContent =
     `Assign ${selectedCommits.size || "selected"} commit${selectedCommits.size === 1 ? "" : "s"}`;
+}
+function resetDiffSelection() {
+  selectedCommit = null;
+  diffFeature = null;
+  featureDiffKey = null;
+  ++diffRequestVersion;
+  $("diff-title").textContent = "Commit details";
+  diffMessage("Select a feature or commit to see its diff.");
+}
+function openFeature(name) {
+  selectedCommit = null;
+  diffFeature = name;
+  selectFeature(name, true);
+  renderCommits();
+}
+async function loadFeatureDiff(name) {
+  const group = graph.groups.find((g) => g.name === name);
+  const revision = graph.revision,
+    key = `${name}:${revision}`;
+  if (featureDiffKey === key) return;
+  featureDiffKey = key;
+  const request = ++diffRequestVersion;
+  $("diff-title").textContent =
+    `Feature: ${name}${group ? ` · ${group.commits.length} commit${group.commits.length === 1 ? "" : "s"}` : ""}`;
+  if (!group) {
+    diffMessage("This feature has no active commits.");
+    return;
+  }
+  diffMessage("Loading feature patch…");
+  const current = () =>
+    diffFeature === name &&
+    !selectedCommit &&
+    request === diffRequestVersion &&
+    graph.revision === revision;
+  try {
+    const result = await api("feature-diff", { name, revision });
+    if (!current()) return;
+    if (result.diff) {
+      diffViewer.setPatch(result.diff);
+      updateDiffControls();
+    } else diffMessage("No net changes in this feature.");
+  } catch (error) {
+    if (!current()) return;
+    featureDiffKey = null;
+    diffMessage(`Could not load feature patch: ${error.message}`);
+  }
 }
 function selectFeature(name, reveal = false) {
   inspectorMode = "feature";
@@ -687,7 +736,7 @@ $("feature-metadata-form").addEventListener("submit", async (event) => {
 });
 $("show-feature").addEventListener("click", () => {
   const commit = graph.commits.find((c) => c.sha === selectedCommit);
-  if (commit?.name) selectFeature(commit.name, true);
+  if (commit?.name) openFeature(commit.name);
 });
 $("branch-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -764,6 +813,8 @@ function selectCommit(sha) {
   }
 }
 async function openCommit(sha) {
+  diffFeature = null;
+  featureDiffKey = null;
   selectCommit(sha);
   $("inspector-sidebar").scrollTo?.({ top: 0 });
   const request = ++diffRequestVersion;
@@ -794,6 +845,7 @@ for (const field of ["title", "description"]) {
   });
 }
 async function refresh() {
+  if (diffFeature) featureDiffKey = null;
   const generation = ++statusGeneration;
   try {
     const nextGraph = await api("graph");
@@ -833,13 +885,14 @@ function openDialog(id) {
 }
 for (const kind of ["push", "sync"]) {
   $(`close-${kind}`).addEventListener("click", () => {
-    if (publishing) return;
+    if (publishing && !(kind === "push" && backgroundPush)) return;
     const dialog = $(`${kind}-dialog`);
     if (dialog.close) dialog.close();
     else dialog.removeAttribute("open");
   });
   $(`${kind}-dialog`).addEventListener("cancel", (event) => {
-    if (publishing) event.preventDefault();
+    if (publishing && !(kind === "push" && backgroundPush))
+      event.preventDefault();
   });
 }
 function renderPushRun(run, nextGraph) {
@@ -902,6 +955,9 @@ async function stopContinuousPush() {
 }
 $("stop-push").addEventListener("click", stopContinuousPush);
 $("stop-push-run").addEventListener("click", stopContinuousPush);
+$("view-push-run").addEventListener("click", () => {
+  if (!publishing || backgroundPush) openDialog("push-dialog");
+});
 $("push-wait").addEventListener("change", () => {
   clearPushPlan();
   $("push-wait-help").hidden = !$("push-wait").checked;
@@ -1028,8 +1084,9 @@ function renderPushFeatures() {
   $("open-sync").disabled = publishing || graph.pushRun?.status === "running";
   updatePushControls();
 }
-function pushBusy(busy) {
+function pushBusy(busy, { background = false } = {}) {
   publishing = busy;
+  backgroundPush = busy && background;
   $("push-progress").hidden = !busy;
   $("push-progress").textContent =
     "Pushing branches and creating or updating PRs…";
@@ -1047,6 +1104,9 @@ function pushBusy(busy) {
     "close-sync",
   ])
     $(id).disabled = busy;
+  $("close-push").disabled = busy && !backgroundPush;
+  $("refresh").disabled = busy && !backgroundPush;
+  $("view-push-run").disabled = busy && !backgroundPush;
   if (!busy) updatePushControls();
   if (graph && inspectorMode === "feature") {
     const group = graph.groups.find((g) => g.name === selectedFeature);
@@ -1135,7 +1195,7 @@ $("execute-push").addEventListener("click", async () => {
   $("push-log").textContent = "";
   $("push-log").hidden = false;
   $("push-error").hidden = true;
-  pushBusy(true);
+  pushBusy(true, { background: !!request.wait });
   let result, failure;
   try {
     result = await api("push", request, (event) => logCommand("push", event));

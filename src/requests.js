@@ -42,6 +42,19 @@ export function operationRequest(manager, route, data, options) {
       throw new Error("Provide a push run ID.");
     return stopPushRun(manager, data.id);
   }
+  if (route === "feature-diff") {
+    if (
+      !data ||
+      typeof data.name !== "string" ||
+      !data.name ||
+      typeof data.revision !== "string" ||
+      !data.revision
+    )
+      throw new Error(
+        "Provide a feature name and repository revision for the diff.",
+      );
+    return manager.featureDiff(data.name, { expectedRevision: data.revision });
+  }
   if (route === "adopt") {
     if (
       !data ||

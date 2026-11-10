@@ -9,7 +9,7 @@ export function requestBridge(
   { signal } = {},
 ) {
   const stream =
-    ["sync", "adopt"].includes(message.route) ||
+    ["sync", "adopt", "feature-diff"].includes(message.route) ||
     (message.route === "push" && message.data?.dryRun === false);
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [bridge], {

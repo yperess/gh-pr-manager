@@ -18,6 +18,7 @@ async function editor(
   storage = new Map(),
   statusResponse,
   diffResponse,
+  featureDiffResponse,
 ) {
   const html = fs.readFileSync(
     new URL("../ui/index.html", import.meta.url),
@@ -82,7 +83,7 @@ async function editor(
       body = options.body ? JSON.parse(options.body) : null;
     calls.push({ route, body, headers: options.headers });
     if (
-      ["sync", "adopt"].includes(route) ||
+      ["sync", "adopt", "feature-diff"].includes(route) ||
       (route === "push" && body?.dryRun === false)
     )
       progressListener?.({
@@ -232,6 +233,14 @@ async function editor(
         }
       }
       graph.revision += "x";
+    } else if (route === "feature-diff") {
+      result = featureDiffResponse
+        ? await featureDiffResponse(body)
+        : {
+            diff: `Feature net diff for ${body.name}`,
+            revision: graph.revision,
+          };
+      if (result.error) return { ok: false, json: async () => result };
     } else if (route.startsWith("diff?")) {
       result = diffResponse
         ? await diffResponse(route)
@@ -244,7 +253,7 @@ async function editor(
     const route = url.slice("/api/".length),
       body = options.body ? JSON.parse(options.body) : null;
     if (
-      !["sync", "adopt"].includes(route) &&
+      !["sync", "adopt", "feature-diff"].includes(route) &&
       !(route === "push" && body?.dryRun === false)
     )
       return fetch(url, options);
@@ -1247,6 +1256,43 @@ for (const vscodeMode of [false, true]) {
     );
     assert.equal(document.querySelectorAll("#push-run-features li").length, 3);
     assert.equal(document.getElementById("push-wait").disabled, true);
+    assert.equal(document.getElementById("close-push").disabled, false);
+    assert.equal(document.getElementById("refresh").disabled, false);
+    assert.equal(document.getElementById("open-push").disabled, true);
+    assert.equal(document.getElementById("open-sync").disabled, true);
+    const cancel = new window.Event("cancel", { cancelable: true });
+    document.getElementById("push-dialog").dispatchEvent(cancel);
+    assert.equal(cancel.defaultPrevented, false);
+    click("close-push");
+    assert.equal(
+      document.getElementById("push-dialog").hasAttribute("open"),
+      false,
+    );
+    assert.equal(
+      calls.some((c) => c.route === "push-stop"),
+      false,
+    );
+    const reads = calls.filter((c) => c.route === "graph").length;
+    click("refresh");
+    await until(() => calls.filter((c) => c.route === "graph").length > reads);
+    document
+      .querySelector(".feature-card")
+      .dispatchEvent(new window.Event("click"));
+    document
+      .getElementById("deps-form")
+      .dispatchEvent(new window.Event("submit", { cancelable: true }));
+    await until(() => calls.some((c) => c.route === "deps"));
+    assert.equal(document.getElementById("error").hidden, true);
+    click("view-push-run");
+    assert.equal(
+      document.getElementById("push-dialog").hasAttribute("open"),
+      true,
+    );
+    assert.equal(
+      calls.filter((c) => c.route === "push" && c.body?.dryRun === false)
+        .length,
+      1,
+    );
     click("stop-push");
     await until(() => calls.some((c) => c.route === "push-stop"));
     assert.deepEqual(calls.find((c) => c.route === "push-stop").body, {
@@ -1478,7 +1524,7 @@ for (const vscodeMode of [false, true]) {
     );
   });
 
-  test(`${vscodeMode ? "VS Code" : "Browser"} clears hidden commit diffs when switching features and ignores late patch responses`, async () => {
+  test(`${vscodeMode ? "VS Code" : "Browser"} switches between feature net diffs and commit patches and ignores late commit responses`, async () => {
     let resolvePending,
       requests = 0;
     const pendingPatch = new Promise((resolve) => {
@@ -1498,42 +1544,127 @@ for (const vscodeMode of [false, true]) {
         node.getAttribute("aria-label").startsWith(`${name}:`),
       );
     click(feature("feature1"));
-    click(document.querySelector(".commit-message"));
-    await until(() => document.querySelector(".diff-file"));
-    // Selecting the same feature still leaves the inspected commit visible.
-    click(feature("feature1"));
-    assert.ok(document.querySelector(".diff-file"));
-    click(feature("feature3"));
-    assert.equal(document.querySelectorAll(".diff-file").length, 0);
-    assert.equal(
-      document.getElementById("diff").textContent,
-      "No commit selected.",
+    await until(
+      () =>
+        document.getElementById("diff").textContent ===
+        "Feature net diff for feature1",
     );
     assert.equal(
       document.getElementById("diff-title").textContent,
-      "Commit details",
+      "Feature: feature1 · 2 commits",
     );
-    assert.equal(document.getElementById("diff-expand").disabled, true);
+    click(document.querySelector(".commit-message"));
+    await until(() => document.querySelector(".diff-file"));
+    click(feature("feature1"));
+    await until(
+      () =>
+        document.getElementById("diff").textContent ===
+        "Feature net diff for feature1",
+    );
+    assert.equal(document.querySelectorAll("#commits tr.selected").length, 0);
+    click(feature("feature3"));
+    await until(
+      () =>
+        document.getElementById("diff").textContent ===
+        "Feature net diff for feature3",
+    );
+    assert.equal(
+      document.getElementById("diff-title").textContent,
+      "Feature: feature3 · 3 commits",
+    );
     assert.equal(document.getElementById("metadata-panel").hidden, true);
     assert.equal(
       document.getElementById("inspector-title").textContent,
       "feature3",
     );
-    assert.equal(document.querySelectorAll("#commits tr.selected").length, 0);
     click(feature("feature1"));
-    assert.equal(document.querySelectorAll("#commits tr.selected").length, 0);
     click(document.querySelector(".commit-message"));
     await until(
       () => calls.filter((call) => call.route.startsWith("diff?")).length === 2,
     );
     click(feature("feature3"));
+    await until(
+      () =>
+        document.getElementById("diff").textContent ===
+        "Feature net diff for feature3",
+    );
     resolvePending({ diff: coloredPatch });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.equal(document.querySelectorAll(".diff-file").length, 0);
     assert.equal(
       document.getElementById("diff").textContent,
-      "No commit selected.",
+      "Feature net diff for feature3",
     );
+    click(document.getElementById("graph-wrap"));
+    assert.equal(
+      document.getElementById("diff").textContent,
+      "Select a feature or commit to see its diff.",
+    );
+  });
+
+  test(`${vscodeMode ? "VS Code" : "Browser"} ignores late feature diffs, refreshes net patches, and displays empty/error states`, async () => {
+    let finish,
+      response = () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        });
+    const { window, document, calls } = await editor(
+      vscodeMode,
+      undefined,
+      new Map(),
+      undefined,
+      undefined,
+      async (body) => response(body),
+    );
+    const click = (node) =>
+      node.dispatchEvent(new window.Event("click", { bubbles: true }));
+    const feature = (name) =>
+      [...document.querySelectorAll(".feature-card")].find((node) =>
+        node.getAttribute("aria-label").startsWith(`${name}:`),
+      );
+    click(feature("feature1"));
+    await until(() => finish);
+    click(document.querySelector(".commit-message"));
+    await until(() =>
+      document.getElementById("diff").textContent.includes("never execute"),
+    );
+    finish({ diff: "stale feature patch" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(
+      !document.getElementById("diff").textContent.includes("stale feature"),
+    );
+    response = () => ({ diff: "" });
+    click(feature("feature1"));
+    await until(
+      () =>
+        document.getElementById("diff").textContent ===
+        "No net changes in this feature.",
+    );
+    const count = calls.filter((call) => call.route === "feature-diff").length;
+    response = () => ({ error: "Missing dependency" });
+    click(document.getElementById("refresh"));
+    await until(() =>
+      document
+        .getElementById("diff")
+        .textContent.includes("Missing dependency"),
+    );
+    assert.ok(
+      calls.filter((call) => call.route === "feature-diff").length > count,
+    );
+    finish = undefined;
+    response = () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      });
+    click(feature("feature3"));
+    await until(() => finish);
+    click(document.getElementById("graph-wrap"));
+    finish({ diff: "late cleared patch" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(
+      document.getElementById("diff").textContent,
+      "Select a feature or commit to see its diff.",
+    );
+    assert.equal(document.getElementById("diff-expand").disabled, true);
   });
 
   test(`${vscodeMode ? "VS Code" : "Browser"} keeps filtering through commit inspection and refresh, supports keyboard selection, and restores edits and selections`, async () => {
@@ -1586,7 +1717,7 @@ for (const vscodeMode of [false, true]) {
       document.getElementById("metadata-title").value,
       "Unsaved commit title",
     );
-    assert.equal(document.getElementById("metadata-panel").hidden, false);
+    assert.equal(document.getElementById("metadata-panel").hidden, true);
     assert.equal(document.querySelector("#commits input").checked, true);
   });
 

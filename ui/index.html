@@ -18,7 +18,7 @@
     </div>
   </header>
   <div id="error" role="alert" hidden></div>
-  <section id="push-run-banner" class="push-run-banner" hidden aria-label="Continuous push"><span id="push-run-summary" role="status"></span><button id="stop-push-run" hidden>Stop push run</button></section>
+  <section id="push-run-banner" class="push-run-banner" hidden aria-label="Continuous push"><span id="push-run-summary" role="status"></span><button id="view-push-run">View progress</button><button id="stop-push-run" hidden>Stop push run</button></section>
   <p id="workspace-info" class="muted" hidden role="status"></p>
   <main>
     <section class="canvas-panel">
@@ -28,12 +28,12 @@
       <div id="graph-wrap"><svg id="graph" aria-label="Feature dependency graph" role="img"></svg><p id="empty" hidden>No grouped commits yet. Select commits below and assign a feature.</p></div>
       <div class="section-heading history-heading"><div><h2>Commit history</h2><p id="history-context" role="status">Oldest first · colors connect commits to their PR group</p></div><span id="branch" class="branch"></span></div>
       <div class="history-table"><table><thead><tr><th aria-label="Select"></th><th>Commit</th><th>Message</th><th>Feature</th><th>PR metadata</th></tr></thead><tbody id="commits"></tbody></table><p id="history-empty" class="muted" hidden></p></div>
-    <section class="diff-panel"><div class="section-heading"><h2 id="diff-title">Commit details</h2><span class="muted">Select a commit to inspect its effective PR metadata and patch</span></div>
+    <section class="diff-panel"><div class="section-heading"><h2 id="diff-title">Commit details</h2><span class="muted">Select a feature for its net diff, or a commit for its patch</span></div>
       <div class="diff-toolbar">
         <div class="pill-toggle" role="group" aria-label="Diff layout"><button id="diff-unified" aria-pressed="true">Unified</button><button id="diff-split" aria-pressed="false">Side by side</button></div>
         <div class="diff-collapse-actions"><button id="diff-expand" disabled>Expand all</button><button id="diff-collapse" disabled>Collapse all</button></div>
       </div>
-      <div id="diff" class="diff-viewer" aria-label="Commit patch"><p class="diff-message">No commit selected.</p></div>
+      <div id="diff" class="diff-viewer" aria-label="Commit patch"><p class="diff-message">Select a feature or commit to see its diff.</p></div>
     </section>
     </section>
     <div id="sidebar-divider" role="separator" tabindex="0" aria-label="Resize inspector" aria-orientation="vertical" aria-controls="inspector-sidebar" aria-valuemin="300" aria-valuemax="720" aria-valuenow="380"></div>
@@ -86,7 +86,7 @@
     </div>
     <div id="push-choice" hidden><fieldset id="push-features" aria-label="Features to push"></fieldset><p id="push-choice-help" class="muted">A waiting feature pushes the full working history as a preview branch, without a PR.</p></div>
     <label class="continuous-option"><input id="push-wait" type="checkbox"> Keep pushing until done</label>
-    <p id="push-wait-help" class="muted" hidden>Include waiting features from this selection. Publish each PR after its prerequisites merge. New features are ignored; changed features are dropped. Stops when all remaining PRs are published or unreachable. Runs in an isolated temporary checkout. Your current checkout keeps its files and becomes detached so you can switch to another branch. Keep this window open; the temporary checkout is retained afterward.</p>
+    <p id="push-wait-help" class="muted" hidden>Include waiting features from this selection. Publish each PR after its prerequisites merge. New features are ignored; changed features are dropped. Stops when all remaining PRs are published or unreachable. Runs in an isolated temporary checkout. Your current checkout keeps its files and becomes detached so you can switch to another branch. You can close this dialog and keep using the editor. Keep this browser tab or extension view open; the temporary checkout is retained afterward.</p>
     <button id="preview-push">Preview push</button>
     <div id="push-plan" hidden><h3>Push preview</h3><p id="push-target" class="muted"></p><ul id="push-actions"></ul><p class="muted">Remote adoption and isolation checks run during push.</p><button id="execute-push" class="primary" disabled>Push branches</button></div>
     <ul id="push-run-features" aria-label="Push run features" hidden></ul>
